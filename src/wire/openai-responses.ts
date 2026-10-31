@@ -32,20 +32,26 @@ async function outbound(transform: Transform, text: string, leaf: TextLeaf): Pro
   return text === '' ? text : transform.outbound(text, leaf)
 }
 
-/** A string, or an array of parts whose `input_text`/`output_text` parts are rewritten. */
-async function rewriteContent(content: unknown, leaf: TextLeaf, transform: Transform): Promise<unknown> {
+/** A slot the walker reads holds a value it cannot classify: refused, never forwarded untransformed. */
+function malformed(slot: string): never {
+  throw new UnsupportedContentError(`OpenAI responses ${slot} has an unexpected shape`)
+}
+
+/** A string, or an array of parts whose `input_text`/`output_text` parts are rewritten; anything else is refused. */
+async function rewriteContent(content: unknown, slot: string, leaf: TextLeaf, transform: Transform): Promise<unknown> {
   if (typeof content === 'string') return outbound(transform, content, leaf)
-  if (!Array.isArray(content)) return content
+  if (!Array.isArray(content)) return malformed(slot)
   const out: unknown[] = []
   for (const part of content) {
-    if (!isObj(part)) {
+    if (!isObj(part)) return malformed(`${slot} part`)
+    refuse(part)
+    if (part.type !== 'input_text' && part.type !== 'output_text') {
+      // Unknown part types pass through (documented deviation); attachments were refused above.
       out.push(part)
       continue
     }
-    refuse(part)
-    out.push((part.type === 'input_text' || part.type === 'output_text') && typeof part.text === 'string'
-      ? { ...part, text: await outbound(transform, part.text, leaf) }
-      : part)
+    if (typeof part.text !== 'string') return malformed(`${slot} ${part.type} part`)
+    out.push({ ...part, text: await outbound(transform, part.text, leaf) })
   }
   return out
 }
@@ -102,13 +108,15 @@ function cachedSummary(item: Obj, ctx: WireContext): string[] | undefined {
 }
 
 async function rewriteReasoning(item: Obj, ctx: WireContext): Promise<Obj> {
-  if (!Array.isArray(item.summary)) return item
+  if (item.summary === undefined) return item
+  if (!Array.isArray(item.summary)) return malformed('reasoning summary')
+  for (const part of item.summary) {
+    if (!isObj(part) || typeof part.text !== 'string') return malformed('reasoning summary part')
+  }
   const cached = cachedSummary(item, ctx)
   const summary: unknown[] = []
-  for (const [i, part] of item.summary.entries()) {
-    if (!isObj(part) || typeof part.text !== 'string') summary.push(part)
-    else if (cached !== undefined) summary.push({ ...part, text: cached[i] })
-    else summary.push({ ...part, text: await outbound(ctx.transform, part.text, { kind: 'thinking' }) })
+  for (const [i, part] of (item.summary as Obj[]).entries()) {
+    summary.push({ ...part, text: cached !== undefined ? cached[i] : await outbound(ctx.transform, part.text as string, { kind: 'thinking' }) })
   }
   return { ...item, summary }
 }
@@ -134,22 +142,23 @@ async function rewriteItem(item: Obj, toolNames: ReadonlyMap<string, string>, ct
   const isMessage = item.type === 'message' || (item.type === undefined && item.role !== undefined)
   if (isMessage) {
     const kind = roleKind(item.role)
-    if (kind === undefined) return item
-    return { ...item, content: await rewriteContent(item.content, { kind }, ctx.transform) }
+    if (kind === undefined) return malformed('message role')
+    return { ...item, content: await rewriteContent(item.content, 'message content', { kind }, ctx.transform) }
   }
   switch (item.type) {
     case 'function_call': {
-      if (typeof item.arguments !== 'string') return item
+      if (typeof item.arguments !== 'string') return malformed('function_call arguments')
       const toolName = typeof item.name === 'string' ? item.name : undefined
       return { ...item, arguments: await rewriteArguments(item.arguments, { kind: 'toolCall', toolName }, ctx.transform) }
     }
     case 'function_call_output': {
       const toolName = typeof item.call_id === 'string' ? toolNames.get(item.call_id) : undefined
-      return { ...item, output: await rewriteContent(item.output, { kind: 'toolResult', toolName }, ctx.transform) }
+      return { ...item, output: await rewriteContent(item.output, 'function_call_output output', { kind: 'toolResult', toolName }, ctx.transform) }
     }
     case 'reasoning':
       return rewriteReasoning(item, ctx)
     default:
+      // Unknown item types pass through (documented deviation).
       return item
   }
 }
@@ -290,10 +299,12 @@ function createStreamTransformer(ctx: WireContext): SseTransformer {
 
 export const openaiResponsesWalker: WireWalker = {
   async request(body: unknown, ctx: WireContext): Promise<unknown> {
-    if (!isObj(body)) return body
+    if (!isObj(body)) return malformed('request body')
     const out: Obj = { ...body }
     if (typeof body.instructions === 'string') {
       out.instructions = await outbound(ctx.transform, body.instructions, { kind: 'system' })
+    } else if (body.instructions !== undefined && body.instructions !== null) {
+      return malformed('instructions')
     }
     const instruction = ctx.transform.instruction
     if (instruction !== undefined) {
@@ -306,8 +317,13 @@ export const openaiResponsesWalker: WireWalker = {
     } else if (Array.isArray(body.input)) {
       const toolNames = toolNamesByCallId(body.input)
       const input: unknown[] = []
-      for (const item of body.input) input.push(isObj(item) ? await rewriteItem(item, toolNames, ctx) : item)
+      for (const item of body.input) {
+        if (!isObj(item)) return malformed('input item')
+        input.push(await rewriteItem(item, toolNames, ctx))
+      }
       out.input = input
+    } else if (body.input !== undefined) {
+      return malformed('input')
     }
     return out
   },

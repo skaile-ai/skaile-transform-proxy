@@ -20,22 +20,29 @@ async function outbound(transform: Transform, text: string, leaf: TextLeaf): Pro
   return text === '' ? text : transform.outbound(text, leaf)
 }
 
-/** A string, or an array of parts whose `text` parts are rewritten. */
+/** A slot the walker reads holds a value it cannot classify: refused, never forwarded untransformed. */
+function malformed(slot: string): never {
+  throw new UnsupportedContentError(`OpenAI chat ${slot} has an unexpected shape`)
+}
+
+/** A string, or an array of parts whose `text` parts are rewritten; `null`/absent carries no text; anything else is refused. */
 async function rewriteContent(content: unknown, leaf: TextLeaf, transform: Transform): Promise<unknown> {
   if (typeof content === 'string') return outbound(transform, content, leaf)
-  if (!Array.isArray(content)) return content
+  if (content === undefined || content === null) return content
+  if (!Array.isArray(content)) return malformed('message content')
   const out: unknown[] = []
   for (const part of content) {
-    if (!isObj(part)) {
-      out.push(part)
-      continue
-    }
+    if (!isObj(part)) return malformed('content part')
     if (typeof part.type === 'string' && REFUSED_PARTS[part.type] === true) {
       throw new UnsupportedContentError(`OpenAI chat ${part.type} content cannot be transformed`)
     }
-    out.push(part.type === 'text' && typeof part.text === 'string'
-      ? { ...part, text: await outbound(transform, part.text, leaf) }
-      : part)
+    if (part.type !== 'text') {
+      // Unknown part types pass through (documented deviation); attachments were refused above.
+      out.push(part)
+      continue
+    }
+    if (typeof part.text !== 'string') return malformed('text part')
+    out.push({ ...part, text: await outbound(transform, part.text, leaf) })
   }
   return out
 }
@@ -88,19 +95,21 @@ function restoreArguments(args: string, transform: Transform): string {
 }
 
 async function rewriteToolCalls(calls: unknown, transform: Transform, names: Map<string, string>): Promise<unknown> {
-  if (!Array.isArray(calls)) return calls
+  if (calls === undefined || calls === null) return calls
+  if (!Array.isArray(calls)) return malformed('tool_calls')
   const out: unknown[] = []
   for (const call of calls) {
-    if (!isObj(call) || !isObj(call.function)) {
+    if (!isObj(call)) return malformed('tool call')
+    if (call.type !== undefined && call.type !== 'function') {
+      // Unknown tool-call types pass through (documented deviation).
       out.push(call)
       continue
     }
     const fn = call.function
+    if (!isObj(fn) || typeof fn.arguments !== 'string') return malformed('function tool call')
     const toolName = typeof fn.name === 'string' ? fn.name : undefined
     if (typeof call.id === 'string' && toolName !== undefined) names.set(call.id, toolName)
-    out.push(typeof fn.arguments === 'string'
-      ? { ...call, function: { ...fn, arguments: await rewriteArguments(fn.arguments, { kind: 'toolCall', toolName }, transform) } }
-      : call)
+    out.push({ ...call, function: { ...fn, arguments: await rewriteArguments(fn.arguments, { kind: 'toolCall', toolName }, transform) } })
   }
   return out
 }
@@ -119,6 +128,7 @@ async function rewriteMessage(message: Obj, transform: Transform, names: Map<str
       for (const field of REASONING_FIELDS) {
         const value = message[field]
         if (typeof value === 'string') out[field] = await outbound(transform, value, { kind: 'thinking' })
+        else if (value !== undefined && value !== null) return malformed(`assistant ${field}`)
       }
       out.content = await rewriteContent(message.content, { kind: 'assistant' }, transform)
       out.tool_calls = await rewriteToolCalls(message.tool_calls, transform, names)
@@ -129,8 +139,14 @@ async function rewriteMessage(message: Obj, transform: Transform, names: Map<str
       out.content = await rewriteContent(message.content, { kind: 'toolResult', toolName }, transform)
       break
     }
+    case 'function': {
+      // Legacy function-calling result: `name` is the function.
+      const toolName = typeof message.name === 'string' ? message.name : undefined
+      out.content = await rewriteContent(message.content, { kind: 'toolResult', toolName }, transform)
+      break
+    }
     default:
-      return message
+      return malformed('message role')
   }
   if (message.content === undefined) delete out.content
   return out
@@ -269,13 +285,15 @@ function createStreamTransformer(ctx: WireContext): SseTransformer {
 
 export const openaiChatWalker: WireWalker = {
   async request(body: unknown, ctx: WireContext): Promise<unknown> {
-    if (!isObj(body)) return body
+    if (!isObj(body)) return malformed('request body')
     const out: Obj = { ...body }
-    if (Array.isArray(body.messages)) {
+    if (body.messages !== undefined) {
+      if (!Array.isArray(body.messages)) return malformed('messages')
       const names = new Map<string, string>()
       const messages: unknown[] = []
       for (const message of body.messages) {
-        messages.push(isObj(message) ? await rewriteMessage(message, ctx.transform, names) : message)
+        if (!isObj(message)) return malformed('message')
+        messages.push(await rewriteMessage(message, ctx.transform, names))
       }
       if (ctx.transform.instruction !== undefined) messages.unshift({ role: 'system', content: ctx.transform.instruction })
       out.messages = messages

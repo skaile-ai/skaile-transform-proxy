@@ -153,6 +153,34 @@ describe('Anthropic round trip', () => {
     expect(await res.json()).toMatchObject({ echo: 'P1' })
     expect(upstreamBody().messages[0]!.content).toBe('P1 asks')
   })
+
+  test('a mixed-case JSON content type is restored, not relayed with placeholders', async () => {
+    const { proxy } = await start()
+    upstream.reply = {
+      headers: { 'content-type': 'Application/JSON; charset=utf-8' },
+      body: JSON.stringify({ id: 'msg_1', type: 'message', role: 'assistant', content: [{ type: 'text', text: 'Hi P1' }] }),
+    }
+    const res = await post(proxy.url, '/v1/messages', routed(), messages('Alice asks'))
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ content: [{ text: 'Hi Alice' }] })
+  })
+
+  test('a mixed-case SSE content type is restored, not relayed with placeholders', async () => {
+    const { proxy } = await start()
+    upstream.reply = {
+      headers: { 'content-type': 'Text/Event-Stream; charset=utf-8' },
+      body: [
+        'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n',
+        'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi P1"}}\n\n',
+        'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+      ].join(''),
+    }
+    const res = await post(proxy.url, '/v1/messages', routed(), messages('Alice asks'))
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(streamedText(body)).toBe('Hi Alice')
+    expect(body).not.toContain('P1')
+  })
 })
 
 describe('forwarding', () => {
@@ -305,6 +333,27 @@ describe('refusals', () => {
     const res = await post(proxy.url, '/v1/messages', routed(), image)
     expect(res.status).toBe(400)
     expect(await errorType(res)).toBe('unsupported_content')
+    expect(upstream.requests).toHaveLength(0)
+  })
+
+  test('a body that is not JSON, or JSON of an unexpected shape, is refused on every wire route; nothing is sent upstream', async () => {
+    const { proxy } = await start()
+    const cases: readonly { path: string; body: string; type: string }[] = [
+      { path: '/v1/messages', body: 'Alice asks', type: 'invalid_json' },
+      { path: '/v1/chat/completions', body: '{"messages":[{"role":"user","content":"Alice"}', type: 'invalid_json' },
+      { path: '/v1/messages', body: '"Alice asks"', type: 'unsupported_content' },
+      { path: '/v1/messages', body: JSON.stringify({ messages: [{ role: 'user', content: { text: 'Alice' } }] }), type: 'unsupported_content' },
+      { path: '/v1/messages/count_tokens', body: JSON.stringify({ system: { text: 'Alice' }, messages: [] }), type: 'unsupported_content' },
+      { path: '/v1/chat/completions', body: JSON.stringify(['Alice']), type: 'unsupported_content' },
+      { path: '/v1/chat/completions', body: JSON.stringify({ messages: [{ role: 'narrator', content: 'Alice' }] }), type: 'unsupported_content' },
+      { path: '/v1/responses', body: JSON.stringify({ input: { text: 'Alice' } }), type: 'unsupported_content' },
+      { path: '/v1/responses', body: JSON.stringify({ input: [{ type: 'function_call', arguments: { q: 'Alice' } }] }), type: 'unsupported_content' },
+    ]
+    for (const { path, body, type } of cases) {
+      const res = await post(proxy.url, path, routed(), body)
+      expect(res.status).toBe(400)
+      expect(await errorType(res)).toBe(type)
+    }
     expect(upstream.requests).toHaveLength(0)
   })
 })

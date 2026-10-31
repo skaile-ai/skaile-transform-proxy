@@ -133,6 +133,42 @@ describe('openaiChatWalker.request', () => {
       expect(openaiChatWalker.request(req, context())).rejects.toBeInstanceOf(UnsupportedContentError)
     })
   }
+
+  const one = (message: unknown) => ({ messages: [message] })
+  test.each([
+    ['a string root', 'Alice'],
+    ['an array root', [{ role: 'user', content: 'Alice' }]],
+    ['a string messages', { messages: 'Alice' }],
+    ['a string message', { messages: ['Alice'] }],
+    ['an unknown role', one({ role: 'narrator', content: 'Alice' })],
+    ['a missing role', one({ content: 'Alice' })],
+    ['an object content', one({ role: 'user', content: { text: 'Alice' } })],
+    ['a numeric content', one({ role: 'system', content: 42 })],
+    ['a string in a content array', one({ role: 'user', content: ['Alice'] })],
+    ['a non-string text part', one({ role: 'user', content: [{ type: 'text', text: { v: 'Alice' } }] })],
+    ['an object reasoning field', one({ role: 'assistant', reasoning_content: { text: 'Alice' } })],
+    ['an object tool_calls', one({ role: 'assistant', tool_calls: { id: 't', function: { name: 'f', arguments: 'Alice' } } })],
+    ['a string tool call', one({ role: 'assistant', tool_calls: ['Alice'] })],
+    ['a function call without function', one({ role: 'assistant', tool_calls: [{ id: 't', type: 'function', arguments: 'Alice' }] })],
+    ['object arguments', one({ role: 'assistant', tool_calls: [{ id: 't', type: 'function', function: { name: 'f', arguments: { q: 'Alice' } } }] })],
+    ['an object tool content', one({ role: 'tool', tool_call_id: 't', content: { text: 'Alice' } })],
+  ])('refuses %s with unsupported_content', async (_name, body) => {
+    await expect(openaiChatWalker.request(body, context())).rejects.toBeInstanceOf(UnsupportedContentError)
+  })
+
+  test('a legacy function message is a tool result; null assistant content and unknown tool-call types pass', async () => {
+    const calls: { text: string; leaf: TextLeaf }[] = []
+    const body = {
+      messages: [
+        { role: 'assistant', content: null, tool_calls: [{ id: 'c', type: 'custom', custom: { name: 'x', input: 'raw' } }] },
+        { role: 'function', name: 'lookup', content: 'found Alice' },
+      ],
+    }
+    const out = (await openaiChatWalker.request(body, context(calls))) as { messages: { content: unknown }[] }
+    expect(calls).toEqual([{ text: 'found Alice', leaf: { kind: 'toolResult', toolName: 'lookup' } }])
+    expect(out.messages[1]).toEqual(body.messages[0]!)
+    expect(out.messages[2]!.content).toBe('found PSEUDO_A')
+  })
 })
 
 describe('openaiChatWalker.response', () => {

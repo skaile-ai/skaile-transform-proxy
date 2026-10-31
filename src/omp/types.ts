@@ -6,6 +6,8 @@ export interface OmpModel {
   readonly id: string
   readonly api: string
   readonly baseUrl?: string
+  /** The provider headers projected onto the model, the transform-proxy headers included. */
+  readonly headers?: Readonly<Record<string, string>>
 }
 
 /** A runtime provider override: omp merges `headers` into the provider's existing headers. */
@@ -40,8 +42,15 @@ export interface OmpContext {
   readonly cwd: string
   readonly modelRegistry: OmpModelRegistry
   readonly sessionManager: { getSessionId(): string }
-  /** The session's active model: a snapshot that a provider override does not update. */
+  /**
+   * The session's active model: a snapshot that a provider override does not update. In
+   * `before_provider_request` it is the model of that request.
+   */
   readonly model: OmpModel | undefined
+  /** False for headless sessions: subagents, print and RPC mode. */
+  readonly hasUI?: boolean
+  /** `tui`, `rpc`, `json` or `print`; subagent sessions run as `print`. */
+  readonly mode?: string
 }
 
 export interface OmpAutocompleteItem {
@@ -50,7 +59,7 @@ export interface OmpAutocompleteItem {
   description?: string
 }
 
-export type OmpEventName = 'session_start' | 'before_agent_start' | 'turn_start'
+export type OmpEventName = 'session_start' | 'session_switch' | 'before_agent_start' | 'turn_start' | 'before_provider_request'
 
 /** Per-session actions of the extension API. */
 export interface OmpSessionActions {
@@ -67,5 +76,6 @@ export interface OmpExtensionApi extends OmpSessionActions {
       handler: (args: string, ctx: OmpContext) => Promise<void>
     },
   ): void
-  on(event: OmpEventName, handler: (event: unknown, ctx: OmpContext) => void | Promise<void>): void
+  /** For `before_provider_request`, a non-undefined result replaces the request payload. */
+  on(event: OmpEventName, handler: (event: unknown, ctx: OmpContext) => unknown): void
 }

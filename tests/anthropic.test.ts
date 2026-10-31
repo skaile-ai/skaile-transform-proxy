@@ -220,6 +220,37 @@ describe('anthropic request', () => {
     }
     await expect(anthropicWalker.request(body, context())).rejects.toBeInstanceOf(UnsupportedContentError)
   })
+
+  const user = (content: unknown) => ({ messages: [{ role: 'user', content }] })
+  test.each([
+    ['a string root', 'Lena'],
+    ['an array root', [{ role: 'user', content: 'Lena' }]],
+    ['a null root', null],
+    ['a numeric system', { system: 42 }],
+    ['an object system', { system: { text: 'Lena' } }],
+    ['a string in a system array', { system: ['Lena'] }],
+    ['a non-string system text block', { system: [{ type: 'text', text: { value: 'Lena' } }] }],
+    ['an object messages', { messages: { role: 'user', content: 'Lena' } }],
+    ['a string message', { messages: ['Lena'] }],
+    ['an object message content', user({ text: 'Lena' })],
+    ['a missing message content', { messages: [{ role: 'user' }] }],
+    ['a string in a content array', user(['Lena'])],
+    ['a non-string text block', user([{ type: 'text', text: { value: 'Lena' } }])],
+    ['a non-string thinking block', { messages: [{ role: 'assistant', content: [{ type: 'thinking', thinking: ['Lena'], signature: 's' }] }] }],
+    ['an object tool_result content', user([{ type: 'tool_result', tool_use_id: 't', content: { text: 'Lena' } }])],
+    ['a string in a tool_result array', user([{ type: 'tool_result', tool_use_id: 't', content: ['Lena'] }])],
+    ['a non-string tool_result text block', user([{ type: 'tool_result', tool_use_id: 't', content: [{ type: 'text', text: 7 }] }])],
+  ])('refuses %s with unsupported_content, before any outbound', async (_name, body) => {
+    const calls: { text: string; leaf: TextLeaf }[] = []
+    const error = await anthropicWalker.request(body, context(calls)).catch((e: unknown) => e)
+    expect(error).toBeInstanceOf(UnsupportedContentError)
+    expect(JSON.stringify(calls)).not.toContain('Lena')
+  })
+
+  test('a tool result without content and an unknown block type pass through', async () => {
+    const body = user([{ type: 'tool_result', tool_use_id: 't' }, { type: 'server_tool_use', id: 'x', input: {} }])
+    expect(await anthropicWalker.request(body, context())).toEqual({ ...body, system: 'INSTR' })
+  })
 })
 
 describe('anthropic response (JSON)', () => {

@@ -18,9 +18,12 @@ export function registerAnonExtension(pi: OmpExtensionApi, controller: AnonContr
     handler: (args, ctx) => guarded(ctx, () => controller.command(args, ctx, pi)),
   })
   on(pi, 'session_start', (ctx) => controller.sessionStart(ctx, pi))
+  on(pi, 'session_switch', (ctx) => controller.sessionSwitch(ctx, pi))
   // Providers can appear or be reset mid-session (model refresh, /login, subagent session setup).
   on(pi, 'before_agent_start', (ctx) => controller.reapply(ctx, pi))
   on(pi, 'turn_start', (ctx) => controller.reapply(ctx, pi))
+  // The last line of defence: a request that would bypass the proxy loses its payload.
+  pi.on('before_provider_request', (_event, ctx) => controller.providerRequest(ctx))
 }
 
 export default function anonExtension(pi: OmpExtensionApi): void {

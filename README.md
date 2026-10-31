@@ -31,6 +31,7 @@ Embeddings are refused on purpose: a vector of pseudonymized input cannot be res
 ## Refusals
 
 - Attachments (image, document, file parts) are refused with 400 `unsupported_content`. Nothing is sent upstream.
+- A body that is not JSON is refused with 400 `invalid_json`. A JSON body whose shape the walker cannot classify is refused with 400 `unsupported_content`: a root that is not an object, or a `system`, `messages`, `input`, `instructions`, message `content`, text, thinking, tool-call `arguments` or tool-result slot of an unexpected type. Unknown part, block and item types still pass through untouched.
 - Unknown routes, pipelines and upstreams are refused before any body is read or transform is built.
 - A transform that throws refuses the request with 502 `transform_failed`. Nothing is sent upstream.
 - Bedrock (SigV4 covers the body) and Vertex are not routed. Refuse them in the caller.
@@ -91,13 +92,15 @@ The package ships an [omp](https://omp.sh) extension (subpath `@skaile/transform
 omp plugin install @skaile/transform-proxy
 ```
 
-It adds the command `/anon on|off|status` and the footer status `anon on` / `anon off`.
+It adds the command `/anon on|off|status` and the footer status `anon on`, `anon off` or `anon error`.
 
 - `/anon on` routes every provider of omp's model registry through the proxy: the provider's `baseUrl` becomes the proxy URL, and the original base URL travels in `x-skaile-transform-upstream`, next to `x-skaile-transform-session` (the omp session id) and the token. The provider's own headers and auth stay in place and are relayed.
   - With `SKAILE_TRANSFORM_PROXY_URL` (and `SKAILE_TRANSFORM_PROXY_TOKEN`) set, it uses that running proxy, and the proxy applies its `defaultPipeline`.
   - Otherwise it starts one proxy inside the omp process, from the config lookup of the CLI (`./.skaile/transform-proxy.yaml`, then `~/.config/skaile/transform-proxy.yaml`). That config must set `defaultPipeline`. Without a config, `/anon on` refuses and says where to put one.
   - Providers on a wire the proxy does not rewrite (Bedrock, Vertex, Gemini, agent bridges, providers without a base URL) are routed too, so the proxy refuses their requests: the setup fails closed. `/anon status` lists them as refused.
-  - The session's active model is rebound to the re-routed one, so the next request already uses the new base URL.
+  - The session's active model is rebound to the re-routed one, so the next request already uses the new base URL. A rebind that fails is an activation failure: `/anon on` rolls the routes back, saves nothing and stays off. When anon is required, or a later turn's rebind fails while anon is on, the footer shows `anon error`.
+- While anon is on or in error, a `before_provider_request` handler checks every model request: a request whose model does not target the proxy gets its payload replaced with an empty object, so no conversation text leaves, and an error notice names the model. omp has no hook that cancels a provider request, and a throwing handler is only logged, so this replacement is the block.
+- The proxy session follows the root omp session: on `/new`, `/resume`, `/fork` (`session_switch`) and on a root `session_start` with a new session id, every provider is re-routed with the new `x-skaile-transform-session`, and the in-process proxy drops the old session. A `session_start` of a headless `print` session (how omp runs subagents) keeps the parent's id, so subagents share its pseudonyms.
 - `/anon off` restores the original base URLs and headers.
 - `/anon status` shows the state, the proxy URL and its source, the pipeline, the session id, and the routed and refused providers.
 - The enabled flag is saved in `skaile-transform-proxy.json` in omp's agent dir (`~/.omp/agent`; `SKAILE_TRANSFORM_PROXY_OMP_STATE` overrides the path) and re-applied when a session starts.

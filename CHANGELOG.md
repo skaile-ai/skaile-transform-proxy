@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.2
+
+- Fail closed on malformed request bodies: the Anthropic, OpenAI chat and OpenAI responses walkers refuse a JSON body whose shape they cannot classify (a root that is not an object; a `system`, `messages`, `input`, `instructions`, message `content`, text, thinking, tool-call `arguments` or tool-result slot of an unexpected type) with 400 `unsupported_content` instead of forwarding it untransformed. Unknown part, block and item types still pass through.
+- Upstream response `content-type` is matched case-insensitively, so `Text/Event-Stream` and `Application/JSON; charset=utf-8` replies are restored instead of relayed with placeholders.
+- omp extension: a failed rebind of the active model is an activation failure. `/anon on` rolls the routes back, persists nothing and stays `anon off`; in required mode, or when a later turn's rebind fails, the footer shows `anon error`. While anon is on or in error, a `before_provider_request` handler replaces the payload of any request whose model bypasses the proxy with an empty object (omp has no hook that cancels a provider request).
+- omp extension: the proxy session follows the root omp session. On `session_switch` (`/new`, `/resume`, `/fork`) and on a root `session_start` with a new id, every provider is re-routed with the new `x-skaile-transform-session`, and the in-process proxy drops the old session; headless `print` sessions (subagents) keep the parent's id.
+
 ## 0.2.1
 
 - Anthropic walker: the pipeline `instruction` is appended after the host's system prompt (last text block, or after a blank line for a string `system`) instead of being prepended. Claude Code gateways such as TeamClaude answer 429 `rate_limit_error` for Sonnet when the system prompt does not start with the Claude Code blocks; with the instruction first, omp and Claude Code requests for `claude-sonnet-4-5` through the proxy were refused.

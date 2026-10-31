@@ -19,24 +19,29 @@ function refuse(block: Obj): void {
   }
 }
 
+/** A slot the walker reads holds a value it cannot classify: refused, never forwarded untransformed. */
+function malformed(slot: string): never {
+  throw new UnsupportedContentError(`Anthropic ${slot} has an unexpected shape`)
+}
+
 async function outbound(transform: Transform, text: string, leaf: TextLeaf): Promise<string> {
   return text === '' ? text : transform.outbound(text, leaf)
 }
 
-/** A string, or an array of blocks whose `text` blocks are rewritten. */
-async function rewriteText(content: unknown, leaf: TextLeaf, transform: Transform): Promise<unknown> {
+/** A string, or an array of blocks whose `text` blocks are rewritten; anything else is refused. */
+async function rewriteText(content: unknown, slot: string, leaf: TextLeaf, transform: Transform): Promise<unknown> {
   if (typeof content === 'string') return outbound(transform, content, leaf)
-  if (!Array.isArray(content)) return content
+  if (!Array.isArray(content)) return malformed(slot)
   const out: unknown[] = []
   for (const block of content) {
-    if (!isObj(block)) {
+    if (!isObj(block)) return malformed(`${slot} block`)
+    refuse(block)
+    if (block.type !== 'text') {
       out.push(block)
       continue
     }
-    refuse(block)
-    out.push(block.type === 'text' && typeof block.text === 'string'
-      ? { ...block, text: await outbound(transform, block.text, leaf) }
-      : block)
+    if (typeof block.text !== 'string') return malformed(`${slot} text block`)
+    out.push({ ...block, text: await outbound(transform, block.text, leaf) })
   }
   return out
 }
@@ -71,30 +76,26 @@ function restoreStrings(value: unknown, transform: Transform): unknown {
 
 /** A thinking block: swaps in the cached model text when its signature is known, else rewrites it. */
 async function rewriteThinking(block: Obj, ctx: WireContext): Promise<Obj> {
+  if (typeof block.thinking !== 'string') return malformed('thinking block')
   if (typeof block.signature === 'string') {
     const cached = ctx.signatures.get(signatureKey(block.signature))
     if (cached !== undefined) return { ...block, thinking: cached }
   }
-  if (typeof block.thinking !== 'string') return block
   return { ...block, thinking: await outbound(ctx.transform, block.thinking, { kind: 'thinking' }) }
 }
 
 async function rewriteContent(content: unknown, role: unknown, toolNames: ReadonlyMap<string, string>, ctx: WireContext): Promise<unknown> {
   const textKind: TextLeafKind = role === 'assistant' ? 'assistant' : 'user'
   if (typeof content === 'string') return outbound(ctx.transform, content, { kind: textKind })
-  if (!Array.isArray(content)) return content
+  if (!Array.isArray(content)) return malformed('message content')
   const out: unknown[] = []
   for (const block of content) {
-    if (!isObj(block)) {
-      out.push(block)
-      continue
-    }
+    if (!isObj(block)) return malformed('message content block')
     refuse(block)
     switch (block.type) {
       case 'text':
-        out.push(typeof block.text === 'string'
-          ? { ...block, text: await outbound(ctx.transform, block.text, { kind: textKind }) }
-          : block)
+        if (typeof block.text !== 'string') return malformed('text block')
+        out.push({ ...block, text: await outbound(ctx.transform, block.text, { kind: textKind }) })
         break
       case 'thinking':
         out.push(await rewriteThinking(block, ctx))
@@ -105,11 +106,17 @@ async function rewriteContent(content: unknown, role: unknown, toolNames: Readon
         break
       }
       case 'tool_result': {
+        // `content` is optional: a tool result without one carries no text.
+        if (block.content === undefined) {
+          out.push(block)
+          break
+        }
         const toolName = typeof block.tool_use_id === 'string' ? toolNames.get(block.tool_use_id) : undefined
-        out.push({ ...block, content: await rewriteText(block.content, { kind: 'toolResult', toolName }, ctx.transform) })
+        out.push({ ...block, content: await rewriteText(block.content, 'tool_result content', { kind: 'toolResult', toolName }, ctx.transform) })
         break
       }
       default:
+        // Unknown block types pass through (documented deviation); attachments were refused above.
         out.push(block)
     }
   }
@@ -235,17 +242,17 @@ function createStreamTransformer(ctx: WireContext): SseTransformer {
 
 export const anthropicWalker: WireWalker = {
   async request(body: unknown, ctx: WireContext): Promise<unknown> {
-    if (!isObj(body)) return body
+    if (!isObj(body)) return malformed('request body')
     const out: Obj = { ...body }
-    if (body.system !== undefined) out.system = await rewriteText(body.system, { kind: 'system' }, ctx.transform)
+    if (body.system !== undefined) out.system = await rewriteText(body.system, 'system', { kind: 'system' }, ctx.transform)
     if (ctx.transform.instruction !== undefined) out.system = withInstruction(out.system, ctx.transform.instruction)
-    if (Array.isArray(body.messages)) {
+    if (body.messages !== undefined) {
+      if (!Array.isArray(body.messages)) return malformed('messages')
       const toolNames = toolNamesById(body.messages)
       const messages: unknown[] = []
       for (const message of body.messages) {
-        messages.push(isObj(message)
-          ? { ...message, content: await rewriteContent(message.content, message.role, toolNames, ctx) }
-          : message)
+        if (!isObj(message)) return malformed('message')
+        messages.push({ ...message, content: await rewriteContent(message.content, message.role, toolNames, ctx) })
       }
       out.messages = messages
     }

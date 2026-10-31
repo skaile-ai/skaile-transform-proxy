@@ -56,12 +56,19 @@ class FakeRegistry implements OmpModelRegistry {
   readonly calls: string[] = []
   constructor(readonly statics: Record<string, StaticProvider>) {}
 
-  /** Fresh model objects on every call, like omp's re-projection: one model per api, id `<provider>-<n>`. */
+  /** Fresh model objects on every call, like omp's re-projection: one model per api, id `<provider>-<n>`, provider headers projected. */
   getAll(): OmpModel[] {
     return Object.entries(this.statics).flatMap(([provider, spec]) =>
       spec.apis.map((api, index) => {
         const baseUrl = this.getProviderBaseUrl(provider)
-        return { provider, id: `${provider}-${index}`, api, ...(baseUrl === undefined ? {} : { baseUrl }) }
+        const headers = this.getProviderHeaders(provider)
+        return {
+          provider,
+          id: `${provider}-${index}`,
+          api,
+          ...(baseUrl === undefined ? {} : { baseUrl }),
+          ...(headers === undefined ? {} : { headers }),
+        }
       }),
     )
   }
@@ -109,7 +116,10 @@ interface FakeContext extends OmpContext, OmpSessionActions {
 interface ContextOptions {
   readonly sessionId?: () => string
   readonly active?: OmpModel
-  readonly setModelResult?: boolean
+  readonly setModelResult?: boolean | 'throw'
+  /** omp's root sessions have a UI (tui) or run in rpc/json mode; subagents are headless `print`. */
+  readonly hasUI?: boolean
+  readonly mode?: string
 }
 
 function context(registry: OmpModelRegistry, options: ContextOptions = {}): FakeContext {
@@ -126,6 +136,7 @@ function context(registry: OmpModelRegistry, options: ContextOptions = {}): Fake
     },
     async setModel(model) {
       rebinds.push(model)
+      if (options.setModelResult === 'throw') throw new Error('model switch failed')
       if (options.setModelResult === false) return false
       this.active = model
       return true
@@ -133,6 +144,8 @@ function context(registry: OmpModelRegistry, options: ContextOptions = {}): Fake
     cwd: root,
     modelRegistry: registry,
     sessionManager: { getSessionId: options.sessionId ?? (() => 'omp-session-1') },
+    ...(options.hasUI === undefined ? {} : { hasUI: options.hasUI }),
+    ...(options.mode === undefined ? {} : { mode: options.mode }),
     ui: {
       notify: (message, type) => notes.push(type === undefined ? { message } : { message, type }),
       setStatus: (key, text) => {
@@ -141,6 +154,11 @@ function context(registry: OmpModelRegistry, options: ContextOptions = {}): Fake
       },
     },
   }
+}
+
+/** The `before_provider_request` context of a request made with `model` (omp passes the request's model). */
+function requestContext(ctx: FakeContext, model: OmpModel | undefined): FakeContext {
+  return { ...ctx, active: model, model }
 }
 
 function standardRegistry(): FakeRegistry {
@@ -160,7 +178,9 @@ interface TestController {
   command(args: string, ctx: FakeContext): Promise<void>
   completions(prefix: string): OmpAutocompleteItem[] | null
   sessionStart(ctx: FakeContext): Promise<void>
+  sessionSwitch(ctx: FakeContext): Promise<void>
   reapply(ctx: FakeContext): Promise<void>
+  providerRequest(ctx: FakeContext): unknown
 }
 
 function controller(env: Record<string, string | undefined> = ENV_PROXY, extra: Partial<AnonControllerDeps> = {}): TestController {
@@ -170,7 +190,9 @@ function controller(env: Record<string, string | undefined> = ENV_PROXY, extra: 
     command: (args, ctx) => inner.command(args, ctx, ctx),
     completions: (prefix) => inner.completions(prefix),
     sessionStart: (ctx) => inner.sessionStart(ctx, ctx),
+    sessionSwitch: (ctx) => inner.sessionSwitch(ctx, ctx),
     reapply: (ctx) => inner.reapply(ctx, ctx),
+    providerRequest: (ctx) => inner.providerRequest(ctx),
   }
 }
 
@@ -340,14 +362,87 @@ describe('active model rebind', () => {
     expect(ctx.model?.baseUrl).toBe('http://127.0.0.1:7001')
   })
 
-  test('a refused rebind is reported', async () => {
-    const registry = standardRegistry()
-    const ctx = context(registry, { active: registry.find('openai', 'openai-0'), setModelResult: false })
-    await controller().command('on', ctx)
-    expect(ctx.notes).toContainEqual({
-      message: 'anon: could not rebind the active model openai/openai-0; select it again',
-      type: 'warning',
+  for (const result of [false, 'throw'] as const) {
+    test(`/anon on with a failed rebind (${result}) is an activation failure: routes rolled back, nothing persisted, off`, async () => {
+      const registry = standardRegistry()
+      const ctx = context(registry, { active: registry.find('openai', 'openai-0'), setModelResult: result })
+      const anon = controller()
+      await anon.command('on', ctx)
+      expect(ctx.notes).toEqual([
+        { message: 'anon: could not rebind the active model openai/openai-0 to the transform proxy', type: 'error' },
+      ])
+      expect(ctx.statuses).toEqual(['anon off'])
+      expect(existsSync(statePath)).toBe(false)
+      expect(registry.calls.at(-1)).toBe('clear skaile-transform-proxy')
+      expect(registry.getProviderBaseUrl('openai')).toBe('https://api.openai.com/v1')
+      expect(registry.getProviderHeaders('openai')).toBeUndefined()
+      await anon.command('status', ctx)
+      expect(lastNote(ctx)).toStartWith('anon off\n')
+      // Off: requests are not touched.
+      expect(anon.providerRequest(ctx)).toBeUndefined()
     })
+  }
+
+  test('required mode: a failed rebind shows anon error, keeps the routes and refuses the stale model\'s requests', async () => {
+    const registry = standardRegistry()
+    const stale = registry.find('openai', 'openai-0')
+    const ctx = context(registry, { active: stale, setModelResult: false })
+    const anon = controller({ ...ENV_PROXY, SKAILE_TRANSFORM_PROXY_MODE: 'required' })
+    await anon.sessionStart(ctx)
+    expect(ctx.statuses).toEqual(['anon error'])
+    expect(ctx.notes).toEqual([
+      { message: 'anon: could not rebind the active model openai/openai-0 to the transform proxy', type: 'error' },
+      { message: 'anon: required mode: model requests are refused until the transform proxy is routed (SKAILE_TRANSFORM_PROXY_MODE=required)', type: 'error' },
+    ])
+    expect(registry.getProviderBaseUrl('openai')).toBe('http://127.0.0.1:7001')
+    expect(anon.providerRequest(requestContext(ctx, stale))).toEqual({})
+    expect(lastNote(ctx)).toBe('anon: model request refused: openai/openai-0 does not target the transform proxy')
+    expect(anon.providerRequest(requestContext(ctx, registry.find('openai', 'openai-0')))).toBeUndefined()
+  })
+
+  test('a rebind failing on a later turn turns anon on into anon error; the next good turn recovers', async () => {
+    const registry = standardRegistry()
+    const anon = controller()
+    const first = context(registry)
+    await anon.command('on', first)
+    registry.runtime.delete('openai')
+    const stale = registry.find('openai', 'openai-0')
+    const broken = context(registry, { active: stale, setModelResult: false })
+    await anon.reapply(broken)
+    expect(broken.statuses).toEqual(['anon error'])
+    expect(broken.notes.map((note) => note.type)).toEqual(['error', 'error'])
+    expect(registry.getProviderBaseUrl('anthropic')).toBe('https://api.anthropic.com')
+    expect(anon.providerRequest(requestContext(broken, stale))).toEqual({})
+    const healthy = context(registry, { active: stale })
+    await anon.reapply(healthy)
+    expect(healthy.statuses).toEqual(['anon on'])
+    expect(anon.providerRequest(requestContext(healthy, healthy.model))).toBeUndefined()
+  })
+})
+
+describe('before_provider_request guard', () => {
+  test('while on, a request whose model bypasses the proxy loses its payload; routed models pass', async () => {
+    const registry = standardRegistry()
+    const stale = registry.find('anthropic', 'anthropic-0')
+    const ctx = context(registry)
+    const anon = controller()
+    expect(anon.providerRequest(requestContext(ctx, stale))).toBeUndefined()
+    await anon.command('on', ctx)
+    expect(anon.providerRequest(requestContext(ctx, registry.find('anthropic', 'anthropic-0')))).toBeUndefined()
+    expect(anon.providerRequest(requestContext(ctx, stale))).toEqual({})
+    expect(anon.providerRequest(requestContext(ctx, undefined))).toEqual({})
+    await anon.command('off', ctx)
+    expect(anon.providerRequest(requestContext(ctx, stale))).toBeUndefined()
+  })
+
+  test('a provider routed by its own config passes', async () => {
+    const registry = new FakeRegistry({
+      skaile: { baseUrl: 'http://127.0.0.1:7555', headers: { [UPSTREAM]: 'https://api.anthropic.com' }, apis: ['anthropic-messages'] },
+    })
+    const ctx = context(registry)
+    const anon = controller({ ...ENV_PROXY, SKAILE_TRANSFORM_PROXY_MODE: 'required' })
+    await anon.sessionStart(ctx)
+    expect(anon.providerRequest(requestContext(ctx, registry.find('skaile', 'skaile-0')))).toBeUndefined()
   })
 })
 
@@ -450,13 +545,73 @@ describe('session_start', () => {
     expect(ctx.statuses).toEqual(['anon on'])
   })
 
-  test('required mode without a reachable proxy reports an error', async () => {
+  test('required mode without a reachable proxy shows anon error and refuses model requests', async () => {
     const registry = standardRegistry()
     const ctx = context(registry)
-    await controller({ SKAILE_TRANSFORM_PROXY_MODE: 'required' }).sessionStart(ctx)
+    const anon = controller({ SKAILE_TRANSFORM_PROXY_MODE: 'required' })
+    await anon.sessionStart(ctx)
     expect(ctx.notes.map((note) => note.type)).toEqual(['error', 'error'])
-    expect(ctx.notes[1]?.message).toBe('anon: required mode, but no provider is routed through the transform proxy')
-    expect(ctx.statuses).toEqual(['anon off'])
+    expect(ctx.notes[1]?.message).toBe('anon: required mode: model requests are refused until the transform proxy is routed (SKAILE_TRANSFORM_PROXY_MODE=required)')
+    expect(ctx.statuses).toEqual(['anon error'])
+    expect(anon.providerRequest(requestContext(ctx, registry.find('openai', 'openai-0')))).toEqual({})
+    expect(lastNote(ctx)).toBe('anon: model request refused: the transform proxy is not available')
+  })
+})
+
+describe('session rotation', () => {
+  test('a new root session re-routes every provider with its id, even when the proxy URL is unchanged', async () => {
+    let id = 'root-1'
+    const registry = standardRegistry()
+    const anon = controller({ ...ENV_PROXY, SKAILE_TRANSFORM_PROXY_MODE: 'required' })
+    const ctx = context(registry, { sessionId: () => id, hasUI: true, mode: 'tui', active: registry.find('anthropic', 'anthropic-0') })
+    await anon.sessionStart(ctx)
+    expect(registry.getProviderHeaders('anthropic')?.[SESSION]).toBe('root-1')
+    id = 'root-2'
+    await anon.sessionSwitch(ctx)
+    for (const provider of ['anthropic', 'openai', 'bedrock', 'vertex']) {
+      expect(registry.getProviderHeaders(provider)?.[SESSION]).toBe('root-2')
+      expect(registry.getProviderBaseUrl(provider)).toBe('http://127.0.0.1:7001')
+    }
+    // The active model is rebound to the re-projected one carrying the new id.
+    expect(ctx.model?.headers?.[SESSION]).toBe('root-2')
+    expect(ctx.statuses.at(-1)).toBe('anon on')
+  })
+
+  test('a root session_start with a new id rotates too; a subagent session keeps the parent id', async () => {
+    let id = 'root-1'
+    const registry = standardRegistry()
+    const anon = controller({ ...ENV_PROXY, SKAILE_TRANSFORM_PROXY_MODE: 'required' })
+    await anon.sessionStart(context(registry, { sessionId: () => id, hasUI: true, mode: 'tui' }))
+    await anon.sessionStart(context(registry, { sessionId: () => 'sub-1', hasUI: false, mode: 'print' }))
+    expect(registry.getProviderHeaders('openai')?.[SESSION]).toBe('root-1')
+    id = 'root-2'
+    await anon.sessionStart(context(registry, { sessionId: () => id, hasUI: false, mode: 'rpc' }))
+    expect(registry.getProviderHeaders('openai')?.[SESSION]).toBe('root-2')
+  })
+
+  test('the in-process proxy drops the rotated-out session', async () => {
+    mkdirSync(join(root, '.skaile'), { recursive: true })
+    writeFileSync(join(root, '.skaile', 'transform-proxy.yaml'), 'pipelines:\n  plain: []\ndefaultPipeline: plain\n')
+    const dropped: string[] = []
+    const anon = controller({}, {
+      startProxy: async (options) => {
+        const proxy = await createTransformProxy(options)
+        started.push(proxy)
+        return { ...proxy, url: proxy.url, dropSession: async (sessionId: string) => {
+          dropped.push(sessionId)
+        } }
+      },
+    })
+    let id = 'root-1'
+    const registry = standardRegistry()
+    const ctx = context(registry, { sessionId: () => id, hasUI: true, mode: 'tui' })
+    await anon.command('on', ctx)
+    await anon.sessionSwitch(ctx)
+    expect(dropped).toEqual([])
+    id = 'root-2'
+    await anon.sessionSwitch(ctx)
+    expect(dropped).toEqual(['root-1'])
+    expect(registry.getProviderHeaders('anthropic')?.[SESSION]).toBe('root-2')
   })
 })
 
@@ -551,7 +706,7 @@ describe('in-process proxy', () => {
 describe('extension registration', () => {
   interface Registered {
     readonly commands: Map<string, Parameters<OmpExtensionApi['registerCommand']>[1]>
-    readonly events: Map<OmpEventName, (event: unknown, ctx: OmpContext) => void | Promise<void>>
+    readonly events: Map<OmpEventName, (event: unknown, ctx: OmpContext) => unknown>
     readonly rebinds: OmpModel[]
     readonly pi: OmpExtensionApi
   }
@@ -572,11 +727,11 @@ describe('extension registration', () => {
     }
   }
 
-  test('registers /anon with completions and the session_start, before_agent_start and turn_start handlers', async () => {
+  test('registers /anon with completions and the session, turn and provider-request handlers', async () => {
     const { pi, commands, events, rebinds } = fakePi()
     registerAnonExtension(pi, controller().inner)
     expect([...commands.keys()]).toEqual(['anon'])
-    expect([...events.keys()]).toEqual(['session_start', 'before_agent_start', 'turn_start'])
+    expect([...events.keys()]).toEqual(['session_start', 'session_switch', 'before_agent_start', 'turn_start', 'before_provider_request'])
     expect(commands.get('anon')?.getArgumentCompletions?.('of')?.map((item) => item.value)).toEqual(['off'])
 
     const registry = standardRegistry()

@@ -120,6 +120,27 @@ describe('openai responses request', () => {
     await expect(openaiResponsesWalker.request(output, context())).rejects.toBeInstanceOf(UnsupportedContentError)
   })
 
+  test.each([
+    ['a string root', 'Lena'],
+    ['an array root', [{ input: 'Lena' }]],
+    ['numeric instructions', { instructions: 42, input: 'x' }],
+    ['object instructions', { instructions: { text: 'Lena' }, input: 'x' }],
+    ['object input', { input: { role: 'user', content: 'Lena' } }],
+    ['numeric input', { input: 7 }],
+    ['a string input item', { input: ['Lena'] }],
+    ['an unknown message role', { input: [{ type: 'message', role: 'narrator', content: 'Lena' }] }],
+    ['a numeric role', { input: [{ role: 5, content: 'Lena' }] }],
+    ['object message content', { input: [{ role: 'user', content: { text: 'Lena' } }] }],
+    ['a string in a content array', { input: [{ role: 'user', content: ['Lena'] }] }],
+    ['a non-string input_text part', { input: [{ role: 'user', content: [{ type: 'input_text', text: { v: 'Lena' } }] }] }],
+    ['object function_call arguments', { input: [{ type: 'function_call', call_id: 'c', name: 'f', arguments: { q: 'Lena' } }] }],
+    ['object function_call_output output', { input: [{ type: 'function_call_output', call_id: 'c', output: { text: 'Lena' } }] }],
+    ['a string reasoning summary', { input: [{ type: 'reasoning', id: 'rs', summary: 'Lena' }] }],
+    ['a non-string summary part', { input: [{ type: 'reasoning', id: 'rs', summary: [{ type: 'summary_text', text: ['Lena'] }] }] }],
+  ])('refuses %s with unsupported_content', async (_name, body) => {
+    await expect(openaiResponsesWalker.request(body, context())).rejects.toBeInstanceOf(UnsupportedContentError)
+  })
+
   test('reasoning cache hit swaps the raw summary back byte for byte without outbound', async () => {
     const ctx = context()
     openaiResponsesWalker.response({

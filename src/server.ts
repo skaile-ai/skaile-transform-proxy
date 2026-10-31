@@ -204,7 +204,8 @@ export async function createTransformProxy(options: TransformProxyOptions): Prom
     rewrite: { readonly wire: WireWalker; readonly ctx: WireContext } | undefined,
   ): Promise<void> {
     if (upstreamRes === undefined) return
-    const contentType = upstreamRes.headers.get('content-type') ?? ''
+    // Media types are case-insensitive (RFC 9110 §8.3.1).
+    const contentType = (upstreamRes.headers.get('content-type') ?? '').toLowerCase()
     const headers = relayHeaders(upstreamRes.headers)
 
     if (rewrite !== undefined && upstreamRes.ok && contentType.startsWith('text/event-stream')) {

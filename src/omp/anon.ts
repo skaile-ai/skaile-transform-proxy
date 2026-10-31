@@ -11,7 +11,7 @@ import {
   type TransformProxy,
   type TransformProxyOptions,
 } from '../server.ts'
-import type { OmpAutocompleteItem, OmpContext, OmpModelRegistry, OmpSessionActions } from './types.ts'
+import type { OmpAutocompleteItem, OmpContext, OmpModel, OmpModelRegistry, OmpSessionActions } from './types.ts'
 
 /** A running proxy the extension routes to. */
 export const URL_ENV = 'SKAILE_TRANSFORM_PROXY_URL'
@@ -54,10 +54,21 @@ export interface AnonController {
   /** Handles `/anon <args>`. `session` rebinds the session's active model after a switch. */
   command(args: string, ctx: OmpContext, session: OmpSessionActions): Promise<void>
   completions(prefix: string): OmpAutocompleteItem[] | null
-  /** Applies the persisted flag (or required mode) and refreshes the status bar. */
+  /**
+   * Applies the persisted flag (or required mode) and refreshes the status bar. A root session
+   * whose omp session id changed rotates the proxy session; subagents keep the parent's id.
+   */
   sessionStart(ctx: OmpContext, session: OmpSessionActions): Promise<void>
-  /** While on: routes providers that appeared, or were reset, since the last pass. */
+  /** `/new`, `/resume`, `/fork`: the root session changed, so the proxy session rotates. */
+  sessionSwitch(ctx: OmpContext, session: OmpSessionActions): Promise<void>
+  /** While on (or failed): routes providers that appeared, or were reset, since the last pass. */
   reapply(ctx: OmpContext, session: OmpSessionActions): Promise<void>
+  /**
+   * `before_provider_request`: while anon is on, failed or required, a request whose model does
+   * not target the transform proxy gets a replacement payload without any conversation text.
+   * Returns `undefined` to keep the payload.
+   */
+  providerRequest(ctx: OmpContext): Record<string, never> | undefined
 }
 
 interface Endpoint {
@@ -66,6 +77,8 @@ interface Endpoint {
   /** The pipeline the proxy applies; `undefined` = the proxy's default (unknown here). */
   readonly pipeline?: string
   readonly source: string
+  /** Set for the in-process proxy: rotated-out sessions are dropped from it. */
+  readonly proxy?: TransformProxy
 }
 
 interface Original {
@@ -78,12 +91,18 @@ interface Original {
 interface RegistryState {
   /** Recorded on first sight, never overwritten: the values `/anon off` restores. */
   readonly originals: Map<string, Original>
-  readonly routed: Set<string>
+  /** Routed provider -> the session id its override carries. */
+  readonly routed: Map<string, string>
 }
 
 /**
  * The process-wide `/anon` state machine. omp builds one extension instance per session
  * (subagents included) while they share one model registry, so one controller serves them all.
+ *
+ * `wanted`: model requests must go through the proxy (required mode, or `/anon on`).
+ * `enabled`: every provider is routed and the active model is rebound. `wanted` without
+ * `enabled` is the error state: the footer shows `anon error` and `providerRequest` refuses
+ * every request that would bypass the proxy.
  */
 export function createAnonController(deps: AnonControllerDeps): AnonController {
   const env = deps.env
@@ -91,6 +110,7 @@ export function createAnonController(deps: AnonControllerDeps): AnonController {
   const statePath = deps.statePath ?? defaultStatePath(env, deps.home)
   const startProxy = deps.startProxy ?? createTransformProxy
   const registries = new WeakMap<OmpModelRegistry, RegistryState>()
+  let wanted = required
   let enabled = false
   let endpoint: Endpoint | undefined
   let starting: Promise<Endpoint> | undefined
@@ -99,7 +119,7 @@ export function createAnonController(deps: AnonControllerDeps): AnonController {
   function stateOf(registry: OmpModelRegistry): RegistryState {
     let state = registries.get(registry)
     if (state === undefined) {
-      state = { originals: new Map(), routed: new Set() }
+      state = { originals: new Map(), routed: new Map() }
       registries.set(registry, state)
     }
     return state
@@ -131,20 +151,37 @@ export function createAnonController(deps: AnonControllerDeps): AnonController {
       throw new Error(`${path} sets no defaultPipeline: the omp extension sends no pipeline header`)
     }
     const proxy = await startProxy({ ...options, log: silentLogger })
-    return { url: proxy.url, pipeline: options.defaultPipeline, source: `in-process, config ${path}` }
+    return { url: proxy.url, pipeline: options.defaultPipeline, source: `in-process, config ${path}`, proxy }
   }
 
   function currentSessionId(ctx: OmpContext): string {
-    if (sessionId === undefined) {
-      let id: unknown
-      try {
-        id = ctx.sessionManager.getSessionId()
-      } catch {
-        id = undefined
-      }
-      sessionId = typeof id === 'string' && id !== '' ? id : randomUUID()
-    }
+    sessionId ??= readSessionId(ctx) ?? randomUUID()
     return sessionId
+  }
+
+  /**
+   * Adopts the session id of a root session and returns the id it replaced, if any. The first
+   * session of the process is the root; later `session_start`s are subagents (headless, `print`
+   * mode) unless the session has a UI or runs in another mode.
+   */
+  function enterSession(ctx: OmpContext, root: boolean): string | undefined {
+    const previous = sessionId
+    if (previous === undefined) {
+      currentSessionId(ctx)
+      return undefined
+    }
+    if (root) sessionId = readSessionId(ctx) ?? previous
+    return sessionId === previous ? undefined : previous
+  }
+
+  async function dropProxySession(ctx: OmpContext, id: string): Promise<void> {
+    const proxy = endpoint?.proxy
+    if (proxy === undefined) return
+    try {
+      await proxy.dropSession(id)
+    } catch (err) {
+      ctx.ui.notify(`anon: could not drop proxy session ${id}: ${errorMessage(err)}`, 'warning')
+    }
   }
 
   function route(ctx: OmpContext, target: Endpoint): void {
@@ -158,13 +195,13 @@ export function createAnonController(deps: AnonControllerDeps): AnonController {
         state.originals.set(provider, original)
       }
       if (original.preRouted) continue
-      if (state.routed.has(provider) && registry.getProviderBaseUrl(provider) === target.url) continue
+      if (state.routed.get(provider) === session && registry.getProviderBaseUrl(provider) === target.url) continue
       // omp merges these into the provider's existing headers, so its own headers stay in place.
       const headers: Record<string, string> = { [SESSION_HEADER]: session }
       if (original.baseUrl !== undefined) headers[UPSTREAM_HEADER] = original.baseUrl
       if (target.token !== undefined) headers[TOKEN_HEADER] = target.token
       registry.registerProvider(provider, { baseUrl: target.url, headers }, SOURCE_ID)
-      state.routed.add(provider)
+      state.routed.set(provider, session)
     }
   }
 
@@ -175,7 +212,7 @@ export function createAnonController(deps: AnonControllerDeps): AnonController {
     // A re-registration would merge, not remove, the proxy headers: only clearing the source drops them.
     registry.clearSourceRegistrations(SOURCE_ID)
     const lost: string[] = []
-    for (const provider of state.routed) {
+    for (const provider of state.routed.keys()) {
       const original = state.originals.get(provider)
       const restored = registry.getProviderBaseUrl(provider)
       if (original === undefined || restored === original.baseUrl) continue
@@ -194,29 +231,60 @@ export function createAnonController(deps: AnonControllerDeps): AnonController {
     return lost
   }
 
-  async function turnOn(ctx: OmpContext, session: OmpSessionActions): Promise<boolean> {
+  /**
+   * Routes every provider and rebinds the active model. Returns the failure, or `undefined`.
+   * A failed rebind leaves the session on a model that bypasses the proxy: outside required
+   * mode the routes are rolled back, so the registry matches the state shown.
+   */
+  async function activate(ctx: OmpContext, session: OmpSessionActions): Promise<string | undefined> {
     let target: Endpoint
     try {
       target = await resolveEndpoint(ctx)
     } catch (err) {
-      ctx.ui.notify(`anon: ${errorMessage(err)}`, 'error')
-      return false
+      enabled = false
+      return errorMessage(err)
     }
     route(ctx, target)
-    enabled = true
-    await rebind(ctx, session)
-    return true
+    if (await rebind(ctx, session)) {
+      enabled = true
+      return undefined
+    }
+    if (!required) unroute(ctx)
+    enabled = false
+    const active = ctx.model
+    return `could not rebind the active model ${active?.provider}/${active?.id} to the transform proxy`
   }
 
   /** The session holds its active model as a snapshot: swap in the registry's re-projected one. */
-  async function rebind(ctx: OmpContext, session: OmpSessionActions): Promise<void> {
+  async function rebind(ctx: OmpContext, session: OmpSessionActions): Promise<boolean> {
     const active = ctx.model
-    if (active === undefined) return
+    if (active === undefined) return true
     const live = ctx.modelRegistry.find(active.provider, active.id)
-    if (live === undefined || live.baseUrl === active.baseUrl) return
-    if (!(await session.setModel(live))) {
-      ctx.ui.notify(`anon: could not rebind the active model ${active.provider}/${active.id}; select it again`, 'warning')
+    if (live === undefined) return false
+    if (live.baseUrl === active.baseUrl && live.headers?.[SESSION_HEADER] === active.headers?.[SESSION_HEADER]) return true
+    try {
+      return await session.setModel(live)
+    } catch {
+      return false
     }
+  }
+
+  /** Why a request of `model` would bypass the proxy, or `undefined` when it targets it. */
+  function bypassReason(ctx: OmpContext, model: OmpModel | undefined): string | undefined {
+    if (model === undefined) return 'the request names no model'
+    if (stateOf(ctx.modelRegistry).originals.get(model.provider)?.preRouted === true) return undefined
+    const proxyOrigin = endpoint === undefined ? undefined : originOf(endpoint.url)
+    if (proxyOrigin === undefined) return 'the transform proxy is not available'
+    if (model.baseUrl === undefined || originOf(model.baseUrl) !== proxyOrigin) {
+      return `${model.provider}/${model.id} does not target the transform proxy`
+    }
+    return undefined
+  }
+
+  function refusalHint(): string {
+    return required
+      ? `anon: required mode: model requests are refused until the transform proxy is routed (${MODE_ENV}=required)`
+      : 'anon: model requests are refused until /anon on succeeds; /anon off sends them directly'
   }
 
   function persist(ctx: OmpContext, value: boolean): void {
@@ -228,21 +296,25 @@ export function createAnonController(deps: AnonControllerDeps): AnonController {
     }
   }
 
+  function stateLabel(): string {
+    return enabled ? 'on' : wanted ? 'error' : 'off'
+  }
+
   function showStatus(ctx: OmpContext): void {
-    ctx.ui.setStatus(STATUS_KEY, enabled ? 'anon on' : 'anon off')
+    ctx.ui.setStatus(STATUS_KEY, `anon ${stateLabel()}`)
   }
 
   function statusText(ctx: OmpContext): string {
     const registry = ctx.modelRegistry
     const state = stateOf(registry)
     const apis = providerApis(registry)
-    const lines = [`anon ${enabled ? 'on' : 'off'}${required ? ' (required)' : ''}`]
+    const lines = [`anon ${stateLabel()}${required ? ' (required)' : ''}`]
     if (endpoint !== undefined) {
       lines.push(`proxy: ${endpoint.url} (${endpoint.source})`)
       lines.push(`pipeline: ${endpoint.pipeline ?? 'the proxy default'}`)
     }
     if (sessionId !== undefined) lines.push(`session: ${sessionId}`)
-    const routed = [...state.routed].sort()
+    const routed = [...state.routed.keys()].sort()
     const refused = routed.flatMap((provider) => {
       const reason = refusalReason(apis.get(provider), state.originals.get(provider))
       return reason === undefined ? [] : [`${provider} (${reason})`]
@@ -254,6 +326,21 @@ export function createAnonController(deps: AnonControllerDeps): AnonController {
     return lines.join('\n')
   }
 
+  /** Session entry: rotate the proxy session for a new root, then (re-)apply routing when wanted. */
+  async function start(ctx: OmpContext, session: OmpSessionActions, root: boolean): Promise<void> {
+    const previous = enterSession(ctx, root)
+    if (!wanted && readEnabled(statePath)) wanted = true
+    if (wanted) {
+      const failure = await activate(ctx, session)
+      if (failure !== undefined) {
+        ctx.ui.notify(`anon: ${failure}`, 'error')
+        ctx.ui.notify(refusalHint(), 'error')
+      }
+    }
+    if (previous !== undefined) await dropProxySession(ctx, previous)
+    showStatus(ctx)
+  }
+
   return {
     required,
     statePath,
@@ -262,11 +349,19 @@ export function createAnonController(deps: AnonControllerDeps): AnonController {
       const verb = args.trim().toLowerCase()
       switch (verb) {
         case 'on': {
-          if (await turnOn(ctx, session)) {
+          const before = wanted
+          wanted = true
+          const failure = await activate(ctx, session)
+          if (failure === undefined) {
             persist(ctx, true)
             const count = stateOf(ctx.modelRegistry).routed.size
             ctx.ui.notify(`anon on: ${count} provider(s) routed through ${endpoint?.url}`, 'info')
+            break
           }
+          // A failed `on` changes nothing: nothing is persisted, and an off state stays off.
+          wanted = before || required
+          ctx.ui.notify(`anon: ${failure}`, 'error')
+          if (wanted) ctx.ui.notify(refusalHint(), 'error')
           break
         }
         case 'off': {
@@ -275,8 +370,11 @@ export function createAnonController(deps: AnonControllerDeps): AnonController {
             break
           }
           const lost = unroute(ctx)
+          wanted = false
           enabled = false
-          await rebind(ctx, session)
+          if (!(await rebind(ctx, session))) {
+            ctx.ui.notify(`anon: could not rebind the active model ${ctx.model?.provider}/${ctx.model?.id}; select it again`, 'warning')
+          }
           persist(ctx, false)
           ctx.ui.notify('anon off: original provider base URLs restored', 'info')
           if (lost.length > 0) {
@@ -303,22 +401,38 @@ export function createAnonController(deps: AnonControllerDeps): AnonController {
       return items.length > 0 ? items : null
     },
 
-    async sessionStart(ctx, session) {
-      currentSessionId(ctx)
-      if (enabled && endpoint !== undefined) {
-        route(ctx, endpoint)
-        await rebind(ctx, session)
-      } else if (required || readEnabled(statePath)) {
-        const on = await turnOn(ctx, session)
-        if (!on && required) ctx.ui.notify('anon: required mode, but no provider is routed through the transform proxy', 'error')
-      }
-      showStatus(ctx)
+    sessionStart(ctx, session) {
+      return start(ctx, session, ctx.hasUI === true || (ctx.mode !== undefined && ctx.mode !== 'print'))
+    },
+
+    sessionSwitch(ctx, session) {
+      return start(ctx, session, true)
     },
 
     async reapply(ctx, session) {
-      if (!enabled || endpoint === undefined) return
-      route(ctx, endpoint)
-      await rebind(ctx, session)
+      if (!wanted) return
+      const was = enabled
+      const failure = await activate(ctx, session)
+      if (failure !== undefined && was) {
+        ctx.ui.notify(`anon: ${failure}`, 'error')
+        ctx.ui.notify(refusalHint(), 'error')
+      }
+      if (enabled !== was) showStatus(ctx)
+    },
+
+    providerRequest(ctx) {
+      if (!wanted) return undefined
+      let reason: string | undefined
+      try {
+        reason = bypassReason(ctx, ctx.model)
+      } catch (err) {
+        reason = errorMessage(err)
+      }
+      if (reason === undefined) return undefined
+      // omp has no hook that cancels a provider request, and a throwing handler is only logged:
+      // the payload is replaced with one that carries no conversation text, which the upstream refuses.
+      ctx.ui.notify(`anon: model request refused: ${reason}`, 'error')
+      return {}
     },
   }
 }
@@ -371,4 +485,22 @@ function refusalReason(apis: ReadonlySet<string> | undefined, original: Original
   if (original?.baseUrl === undefined) return 'no base URL'
   const unserved = [...(apis ?? [])].filter((api) => !Object.hasOwn(SERVED_APIS, api))
   return unserved.length === 0 ? undefined : unserved.join(', ')
+}
+
+function readSessionId(ctx: OmpContext): string | undefined {
+  try {
+    const id: unknown = ctx.sessionManager.getSessionId()
+    return typeof id === 'string' && id !== '' ? id : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** The origin of an http(s) URL; `undefined` for anything else, which never matches the proxy. */
+function originOf(url: string): string | undefined {
+  try {
+    return new URL(url).origin
+  } catch {
+    return undefined
+  }
 }
