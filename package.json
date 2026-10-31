@@ -21,7 +21,14 @@
       "types": "./dist/index.d.mts",
       "import": "./dist/index.mjs"
     },
+    "./omp": {
+      "types": "./dist/omp/index.d.mts",
+      "import": "./dist/omp/index.mjs"
+    },
     "./package.json": "./package.json"
+  },
+  "omp": {
+    "extensions": ["./dist/omp/index.mjs"]
   },
   "bin": {
     "skaile-transform-proxy": "dist/cli.mjs"

@@ -81,6 +81,28 @@ await proxy.dropSession('s1')
 await proxy.close()
 ```
 
+## omp extension
+
+The package ships an [omp](https://omp.sh) extension (subpath `@skaile/transform-proxy/omp`, declared in the package manifest under `omp.extensions`):
+
+```sh
+omp plugin install @skaile/transform-proxy
+```
+
+It adds the command `/anon on|off|status` and the footer status `anon on` / `anon off`.
+
+- `/anon on` routes every provider of omp's model registry through the proxy: the provider's `baseUrl` becomes the proxy URL, and the original base URL travels in `x-skaile-transform-upstream`, next to `x-skaile-transform-session` (the omp session id) and the token. The provider's own headers and auth stay in place and are relayed.
+  - With `SKAILE_TRANSFORM_PROXY_URL` (and `SKAILE_TRANSFORM_PROXY_TOKEN`) set, it uses that running proxy, and the proxy applies its `defaultPipeline`.
+  - Otherwise it starts one proxy inside the omp process, from the config lookup of the CLI (`./.skaile/transform-proxy.yaml`, then `~/.config/skaile/transform-proxy.yaml`). That config must set `defaultPipeline`. Without a config, `/anon on` refuses and says where to put one.
+  - Providers on a wire the proxy does not rewrite (Bedrock, Vertex, Gemini, agent bridges, providers without a base URL) are routed too, so the proxy refuses their requests: the setup fails closed. `/anon status` lists them as refused.
+  - The session's active model is rebound to the re-routed one, so the next request already uses the new base URL.
+- `/anon off` restores the original base URLs and headers.
+- `/anon status` shows the state, the proxy URL and its source, the pipeline, the session id, and the routed and refused providers.
+- The enabled flag is saved in `skaile-transform-proxy.json` in omp's agent dir (`~/.omp/agent`; `SKAILE_TRANSFORM_PROXY_OMP_STATE` overrides the path) and re-applied when a session starts.
+- `SKAILE_TRANSFORM_PROXY_MODE=required` (set by a skaile session in required mode) turns routing on at session start and refuses `/anon off`.
+
+The overrides are registered under the model-registry source `skaile-transform-proxy`, so `/anon off` clears them in one catalog reload. A provider that another extension registered at runtime is taken over while anon is on; `/anon off` restores its base URL and headers, and a provider that existed only at runtime is reported as lost (restart omp to restore it).
+
 ## Writing a transform module
 
 A module default-exports a `TransformModule`:
