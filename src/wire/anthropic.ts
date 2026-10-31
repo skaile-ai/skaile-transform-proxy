@@ -130,10 +130,15 @@ function toolNamesById(messages: readonly unknown[]): Map<string, string> {
   return names
 }
 
+/**
+ * Appends the instruction after the host's system prompt. Gateways that serve only Claude Code
+ * traffic check that the system prompt starts with the Claude Code blocks (TeamClaude answers
+ * 429 for Sonnet otherwise), so the host's leading blocks must stay first.
+ */
 function withInstruction(system: unknown, instruction: string): unknown {
   if (system === undefined) return instruction
-  if (typeof system === 'string') return `${instruction}\n\n${system}`
-  if (Array.isArray(system)) return [{ type: 'text', text: instruction }, ...system]
+  if (typeof system === 'string') return `${system}\n\n${instruction}`
+  if (Array.isArray(system)) return [...system, { type: 'text', text: instruction }]
   return system
 }
 

@@ -131,7 +131,7 @@ describe('anthropic request', () => {
     const out = await anthropicWalker.request(body, context(calls)) as typeof body
 
     expect(body).toEqual(original)
-    expect(out.system).toBe('INSTR\n\nYou help PSEUDO_A.')
+    expect(out.system).toBe('You help PSEUDO_A.\n\nINSTR')
     expect(out.messages[0]?.content).toBe('Hi, I am PSEUDO_A')
     expect(out.messages[1]?.content).toEqual([
       { type: 'thinking', thinking: 'PSEUDO_A thinks', signature: 'SIG1' },
@@ -159,12 +159,19 @@ describe('anthropic request', () => {
     expect(await anthropicWalker.request(bare, ctx)).toEqual({ messages: [{ role: 'user', content: 'hi' }], system: 'INSTR' })
   })
 
-  test('prepends the instruction as a text block to an array system prompt', async () => {
-    const body = { system: [{ type: 'text', text: 'Lena rules', cache_control: { type: 'ephemeral' } }], messages: [] }
+  test('appends the instruction as the last text block of an array system prompt, after the host blocks', async () => {
+    const body = {
+      system: [
+        { type: 'text', text: "You are Claude Code, Anthropic's official CLI for Claude." },
+        { type: 'text', text: 'Lena rules', cache_control: { type: 'ephemeral' } },
+      ],
+      messages: [],
+    }
     const out = await anthropicWalker.request(body, context()) as { system: unknown[] }
     expect(out.system).toEqual([
-      { type: 'text', text: 'INSTR' },
+      { type: 'text', text: "You are Claude Code, Anthropic's official CLI for Claude." },
       { type: 'text', text: 'PSEUDO_A rules', cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: 'INSTR' },
     ])
   })
 

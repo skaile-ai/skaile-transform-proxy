@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.1
+
+- Anthropic walker: the pipeline `instruction` is appended after the host's system prompt (last text block, or after a blank line for a string `system`) instead of being prepended. Claude Code gateways such as TeamClaude answer 429 `rate_limit_error` for Sonnet when the system prompt does not start with the Claude Code blocks; with the instruction first, omp and Claude Code requests for `claude-sonnet-4-5` through the proxy were refused.
+
 ## 0.2.0
 
 - OpenAI chat completions (`/chat/completions`) and OpenAI responses (`/responses`) walkers: text leaves, tool-call arguments and reasoning summaries are transformed outbound and restored in JSON and SSE replies; `image_url`, `input_audio`, `file`, `input_image` and `input_file` parts are refused with 400 `unsupported_content`. Responses reasoning summaries are cached by item id so a replayed reasoning item is sent back byte for byte.

@@ -21,10 +21,12 @@ The proxy strips all four headers before forwarding. Every other header, includi
 |---|---|
 | `POST …/messages` | Anthropic request and response: request rewritten, JSON reply and SSE stream restored. |
 | `POST …/messages/count_tokens` | Request rewritten; the response passes through untouched. |
+| `POST …/chat/completions` | OpenAI chat request and response: request rewritten, JSON reply and SSE stream restored. |
+| `POST …/responses` | OpenAI responses request and response: request rewritten, JSON reply and SSE stream restored. |
 | `GET …/models` | Passthrough. |
-| anything else (chat completions, responses, embeddings) | 404 `unsupported_route`. |
+| anything else (embeddings included) | 404 `unsupported_route`. |
 
-OpenAI chat and responses walkers are not implemented yet. Embeddings are refused on purpose: a vector of pseudonymized input cannot be restored.
+Embeddings are refused on purpose: a vector of pseudonymized input cannot be restored.
 
 ## Refusals
 
@@ -110,6 +112,8 @@ A module default-exports a `TransformModule`:
 - `open(config, { baseDir, log })` runs once per proxy. It validates the config and builds shared state. Throwing rejects startup.
 - It returns a `TransformFactory`, which runs once per `(session, pipeline)`: `(ctx: { sessionId, facts, log }) => Transform`.
 - A `Transform` has `instruction?`, `outbound(text, leaf)`, `inbound(text)`, `inboundStream()` and `dispose?()`.
+
+The Anthropic walker appends the pipeline `instruction` after the host's system prompt: a string `system` gets it after a blank line, a block array gets it as one more text block at the end, and an absent `system` becomes the instruction. The host's leading blocks stay first, because Claude Code gateways (TeamClaude) refuse Sonnet requests with 429 `rate_limit_error` when the system prompt does not start with the Claude Code blocks. The OpenAI walkers still put the instruction first: a leading `system` message in chat completions, a prefix of `instructions` in responses.
 
 `inboundStream().push(c1) + … + flush()` must equal `inbound(c1 + … + cn)` for every chunking.
 

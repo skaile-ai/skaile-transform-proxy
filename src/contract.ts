@@ -16,7 +16,7 @@ export interface TextLeaf {
 
 /** One session's instance of one pipeline stage. */
 export interface Transform {
-  /** Prepended to the system prompt; omit when the model needs no instruction. */
+  /** Added to the system prompt by each wire walker (Anthropic: appended last; OpenAI: placed first); omit when the model needs no instruction. */
   readonly instruction?: string
   /** Host -> model, one text leaf. A throw refuses the request (502 `transform_failed`); nothing is sent. */
   outbound(text: string, leaf: TextLeaf): Promise<string>
