@@ -260,7 +260,7 @@ describe('refusals', () => {
 
   test('unknown routes and embeddings answer 404 unsupported_route; nothing is sent upstream', async () => {
     const { proxy } = await start()
-    for (const path of ['/v1/chat/completions', '/v1/responses', '/v1/embeddings']) {
+    for (const path of ['/v1/embeddings', '/v1/completions', '/v1/audio/speech']) {
       const res = await post(proxy.url, path, routed(), JSON.stringify({ model: 'm', input: 'Alice' }))
       expect(res.status).toBe(404)
       expect(await errorType(res)).toBe('unsupported_route')

@@ -1,4 +1,6 @@
 import { anthropicWalker } from './wire/anthropic.ts'
+import { openaiChatWalker } from './wire/openai-chat.ts'
+import { openaiResponsesWalker } from './wire/openai-responses.ts'
 import type { WireWalker } from './wire/types.ts'
 
 /** A POST route: the path suffix it matches, the walker that rewrites the request, and whether the response is rewritten too. */
@@ -10,12 +12,13 @@ export interface WireRoute {
 
 /**
  * The route table. Routes are matched in order, so longer suffixes come first.
- * Add the OpenAI walkers here (`/chat/completions`, `/responses`) when they exist. Until then
- * those paths, and embeddings, answer 404 `unsupported_route`.
+ * Any other path, embeddings included, answers 404 `unsupported_route`.
  */
 export const WIRE_ROUTES: readonly WireRoute[] = [
   { suffix: '/messages/count_tokens', wire: anthropicWalker, rewriteResponse: false },
   { suffix: '/messages', wire: anthropicWalker, rewriteResponse: true },
+  { suffix: '/chat/completions', wire: openaiChatWalker, rewriteResponse: true },
+  { suffix: '/responses', wire: openaiResponsesWalker, rewriteResponse: true },
 ]
 
 export type Classified = { readonly kind: 'wire'; readonly route: WireRoute } | { readonly kind: 'passthrough' }

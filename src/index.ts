@@ -24,4 +24,6 @@ export {
   type ResolvedProxyConfig,
 } from './config.ts'
 export { anthropicWalker } from './wire/anthropic.ts'
+export { openaiChatWalker } from './wire/openai-chat.ts'
+export { openaiResponsesWalker } from './wire/openai-responses.ts'
 export { UnsupportedContentError, type SseTransformer, type WireContext, type WireWalker } from './wire/types.ts'

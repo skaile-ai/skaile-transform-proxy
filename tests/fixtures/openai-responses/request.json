@@ -1,0 +1,18 @@
+{
+  "model": "gpt-5",
+  "instructions": "You help Lena.",
+  "tools": [{ "type": "function", "name": "lookup", "description": "Find Lena", "parameters": { "type": "object" } }],
+  "metadata": { "who": "Lena" },
+  "input": [
+    { "role": "developer", "content": "Developer note for Lena" },
+    { "type": "message", "role": "system", "content": [{ "type": "input_text", "text": "System Lena" }] },
+    { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "Hi, I am Lena" }, { "type": "custom_part", "text": "Lena" }] },
+    { "type": "reasoning", "id": "rs_1", "summary": [{ "type": "summary_text", "text": "Thinking about Lena" }], "encrypted_content": "ENC(Lena)" },
+    { "type": "message", "role": "assistant", "content": [{ "type": "output_text", "text": "Hello Lena" }] },
+    { "type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": "{\"name\":\"Lena\",\"tags\":[\"say \\\"hi\\\"\"],\"n\":2}" },
+    { "type": "function_call_output", "call_id": "call_1", "output": "Lena found" },
+    { "type": "function_call", "call_id": "call_2", "name": "notes", "arguments": "Lena raw" },
+    { "type": "function_call_output", "call_id": "call_2", "output": [{ "type": "input_text", "text": "note on Lena" }] },
+    { "type": "web_search_call", "id": "ws_1", "action": { "query": "Lena" } }
+  ]
+}
