@@ -1,6 +1,6 @@
 {
   "name": "@skaile/transform-proxy",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "Same-protocol passthrough proxy that runs model requests and replies through a chain of text transforms (Anthropic Messages, OpenAI chat, OpenAI responses)",
   "license": "MIT",
@@ -12,7 +12,14 @@
   "bugs": {
     "url": "https://github.com/skaile-ai/skaile-transform-proxy/issues"
   },
-  "keywords": ["llm", "proxy", "anthropic", "openai", "anonymization", "transform"],
+  "keywords": [
+    "llm",
+    "proxy",
+    "anthropic",
+    "openai",
+    "anonymization",
+    "transform"
+  ],
   "engines": {
     "node": ">=22"
   },
@@ -28,12 +35,19 @@
     "./package.json": "./package.json"
   },
   "omp": {
-    "extensions": ["./dist/omp/index.mjs"]
+    "extensions": [
+      "./dist/omp/index.mjs"
+    ]
   },
   "bin": {
     "skaile-transform-proxy": "dist/cli.mjs"
   },
-  "files": ["dist", "README.md", "CHANGELOG.md", "LICENSE"],
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
   "publishConfig": {
     "access": "public"
   },
