@@ -93,6 +93,7 @@ describe('runCli', () => {
     const result = await run(['--help'], env)
     expect(result.code).toBe(0)
     expect(env.out.join('\n')).toContain('skaile-transform-proxy [--config')
+    expect(env.out.join('\n')).toContain('[--exit-with-stdin]')
   })
 
   test('a non-numeric or out-of-range --port: exit 2', async () => {
@@ -164,22 +165,45 @@ describe('runCli', () => {
   })
 
   test('the bin entry prints listening and exits 0 on SIGTERM', async () => {
-    const cli = fileURLToPath(new URL('../src/cli.ts', import.meta.url))
     const path = writeFile(join(root, '.skaile', 'transform-proxy.yaml'), CONFIG)
-    const proc = Bun.spawn([process.execPath, cli, '--config', path, '--port', '0'], {
+    const proc = Bun.spawn([process.execPath, CLI, '--config', path, '--port', '0'], {
       stdout: 'pipe',
       stderr: 'pipe',
     })
-    const reader = proc.stdout.getReader()
-    const decoder = new TextDecoder()
-    let text = ''
-    while (!/listening http:\/\/\S+\n/.test(text)) {
-      const { value, done } = await reader.read()
-      if (done) break
-      text += decoder.decode(value)
-    }
-    expect(text).toMatch(/listening http:\/\/127\.0\.0\.1:\d+\n/)
+    expect(await readListening(proc.stdout)).toMatch(/listening http:\/\/127\.0\.0\.1:\d+\n/)
     proc.kill('SIGTERM')
     expect(await proc.exited).toBe(0)
   })
+
+  test('with --exit-with-stdin the bin entry exits 0 when its stdin closes', async () => {
+    const path = writeFile(join(root, '.skaile', 'transform-proxy.yaml'), CONFIG)
+    const proc = Bun.spawn([process.execPath, CLI, '--config', path, '--port', '0', '--exit-with-stdin'], {
+      stdin: 'pipe',
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    try {
+      expect(await readListening(proc.stdout)).toMatch(/listening http:\/\/127\.0\.0\.1:\d+\n/)
+      await proc.stdin.end()
+      expect(await proc.exited).toBe(0)
+    } finally {
+      proc.kill('SIGKILL')
+    }
+  })
 })
+
+const CLI = fileURLToPath(new URL('../src/cli.ts', import.meta.url))
+
+/** Reads the child's stdout up to its listening line. */
+async function readListening(stdout: ReadableStream<Uint8Array>): Promise<string> {
+  const reader = stdout.getReader()
+  const decoder = new TextDecoder()
+  let text = ''
+  while (!/listening http:\/\/\S+\n/.test(text)) {
+    const { value, done } = await reader.read()
+    if (done) break
+    text += decoder.decode(value)
+  }
+  reader.releaseLock()
+  return text
+}

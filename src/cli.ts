@@ -10,7 +10,7 @@ import { createTransformProxy, type TransformProxy } from './server.ts'
 /** Environment variable that supplies the client token when `--token` is absent. */
 export const TOKEN_ENV = 'SKAILE_TRANSFORM_PROXY_TOKEN'
 
-const USAGE = 'usage: skaile-transform-proxy [--config <file>] [--port <n>] [--host <h>] [--token <t>]'
+const USAGE = 'usage: skaile-transform-proxy [--config <file>] [--port <n>] [--host <h>] [--token <t>] [--exit-with-stdin]'
 
 export interface CliEnvironment {
   readonly cwd: string
@@ -24,11 +24,13 @@ export interface CliEnvironment {
 export interface CliRun {
   readonly code: number
   readonly proxy?: TransformProxy
+  /** `--exit-with-stdin`: the caller stops the proxy when its stdin closes (the parent process is gone). */
+  readonly exitWithStdin?: boolean
 }
 
 /** Parses the arguments, loads the config and starts the proxy. Never installs signal handlers. */
 export async function runCli(argv: readonly string[], io: CliEnvironment): Promise<CliRun> {
-  let values: { config?: string; port?: string; host?: string; token?: string; help?: boolean }
+  let values: { config?: string; port?: string; host?: string; token?: string; 'exit-with-stdin'?: boolean; help?: boolean }
   try {
     ;({ values } = parseArgs({
       args: [...argv],
@@ -39,6 +41,7 @@ export async function runCli(argv: readonly string[], io: CliEnvironment): Promi
         host: { type: 'string' },
         token: { type: 'string' },
         help: { type: 'boolean', short: 'h' },
+        'exit-with-stdin': { type: 'boolean' },
       },
     }))
   } catch (err) {
@@ -73,7 +76,7 @@ export async function runCli(argv: readonly string[], io: CliEnvironment): Promi
       log: { debug: () => {}, info: () => {}, warn: (msg, ...args) => io.stderr(format('warn', msg, args)), error: (msg, ...args) => io.stderr(format('error', msg, args)) },
     })
     io.stdout(`listening ${proxy.url}`)
-    return { code: 0, proxy }
+    return { code: 0, proxy, exitWithStdin: values['exit-with-stdin'] === true }
   } catch (err) {
     io.stderr(errorMessage(err))
     return { code: 1 }
@@ -113,7 +116,10 @@ if (isEntryPoint()) {
     process.exitCode = run.code
   } else {
     const proxy = run.proxy
+    let stopping = false
     const stop = (): void => {
+      if (stopping) return
+      stopping = true
       proxy.close().then(
         () => process.exit(0),
         (err: unknown) => {
@@ -124,5 +130,11 @@ if (isEntryPoint()) {
     }
     process.once('SIGINT', stop)
     process.once('SIGTERM', stop)
+    if (run.exitWithStdin === true) {
+      // The parent keeps the pipe open and never writes; it closes when the parent exits, even on SIGKILL.
+      process.stdin.once('end', stop)
+      process.stdin.once('close', stop)
+      process.stdin.resume()
+    }
   }
 }

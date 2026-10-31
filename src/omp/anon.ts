@@ -1,22 +1,20 @@
-import { randomUUID } from 'node:crypto'
+import { spawn } from 'node:child_process'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import type { Readable, Writable } from 'node:stream'
+import { fileURLToPath } from 'node:url'
 import { configCandidates, findProxyConfig, loadProxyConfig } from '../config.ts'
-import { errorMessage, silentLogger } from '../log.ts'
-import {
-  createTransformProxy,
-  SESSION_HEADER,
-  TOKEN_HEADER,
-  UPSTREAM_HEADER,
-  type TransformProxy,
-  type TransformProxyOptions,
-} from '../server.ts'
+import { errorMessage } from '../log.ts'
+import { SESSION_HEADER, TOKEN_HEADER, UPSTREAM_HEADER } from '../server.ts'
 import type { OmpAutocompleteItem, OmpContext, OmpModel, OmpModelRegistry, OmpSessionActions } from './types.ts'
 
 /** A running proxy the extension routes to. */
 export const URL_ENV = 'SKAILE_TRANSFORM_PROXY_URL'
-/** The client token of that proxy. */
+/** The client token of that proxy; also how the extension hands its own proxy child a random token. */
 export const TOKEN_ENV = 'SKAILE_TRANSFORM_PROXY_TOKEN'
+/** The Node binary that runs the proxy child; default: `node` from `PATH`. */
+export const NODE_ENV = 'SKAILE_TRANSFORM_PROXY_NODE'
 /** `required` (set by a skaile session in required mode): routing is forced on and `/anon off` is refused. */
 export const MODE_ENV = 'SKAILE_TRANSFORM_PROXY_MODE'
 /** Overrides the path of the persisted enabled flag. */
@@ -39,13 +37,36 @@ const VERBS: readonly OmpAutocompleteItem[] = [
   { value: 'status', label: 'status', description: 'show the proxy, pipeline and routed providers' },
 ]
 
+/** How the extension spawns its proxy child. */
+export interface ProxySpawnOptions {
+  readonly cwd: string
+  readonly env: Readonly<Record<string, string | undefined>>
+  readonly stdio: readonly ['pipe', 'pipe', 'pipe']
+}
+
+/** The slice of a `node:child_process` `ChildProcess` the extension uses. */
+export interface ProxyChildProcess {
+  readonly pid?: number | undefined
+  readonly stdin: Writable | null
+  readonly stdout: Readable | null
+  readonly stderr: Readable | null
+  kill(signal?: NodeJS.Signals): boolean
+  unref(): void
+  on(event: 'exit', listener: (code: number | null, signal: NodeJS.Signals | null) => void): unknown
+  on(event: 'error', listener: (err: Error) => void): unknown
+}
+
 export interface AnonControllerDeps {
   readonly env: Readonly<Record<string, string | undefined>>
   readonly home: string
   /** Default: `$SKAILE_TRANSFORM_PROXY_OMP_STATE`, else `<omp agent dir>/skaile-transform-proxy.json`. */
   readonly statePath?: string
-  /** Default: `createTransformProxy`. */
-  readonly startProxy?: (options: TransformProxyOptions) => Promise<TransformProxy>
+  /** Spawns the proxy child. Default: `node:child_process` `spawn`. */
+  readonly spawnChild?: (command: string, args: readonly string[], options: ProxySpawnOptions) => ProxyChildProcess
+  /** The CLI the child runs. Default: this package's `dist/cli.mjs`, next to the built extension's `dist/omp/`. */
+  readonly cliPath?: string
+  /** How long the child may take to print `listening <url>`. Default: 60 s (transform modules may load ML models). */
+  readonly listenTimeoutMs?: number
 }
 
 export interface AnonController {
@@ -77,8 +98,8 @@ interface Endpoint {
   /** The pipeline the proxy applies; `undefined` = the proxy's default (unknown here). */
   readonly pipeline?: string
   readonly source: string
-  /** Set for the in-process proxy: rotated-out sessions are dropped from it. */
-  readonly proxy?: TransformProxy
+  /** Set for the extension's own proxy child; `exited` flips when it dies, so the next activation starts a new one. */
+  readonly child?: { exited: boolean }
 }
 
 interface Original {
@@ -108,7 +129,8 @@ export function createAnonController(deps: AnonControllerDeps): AnonController {
   const env = deps.env
   const required = env[MODE_ENV] === 'required'
   const statePath = deps.statePath ?? defaultStatePath(env, deps.home)
-  const startProxy = deps.startProxy ?? createTransformProxy
+  const spawnChild = deps.spawnChild ?? spawnNode
+  const listenTimeoutMs = deps.listenTimeoutMs ?? 60_000
   const registries = new WeakMap<OmpModelRegistry, RegistryState>()
   let wanted = required
   let enabled = false
@@ -126,21 +148,25 @@ export function createAnonController(deps: AnonControllerDeps): AnonController {
   }
 
   async function resolveEndpoint(ctx: OmpContext): Promise<Endpoint> {
-    if (endpoint !== undefined) return endpoint
+    if (endpoint !== undefined && endpoint.child?.exited !== true) return endpoint
     const url = env[URL_ENV]
     if (url !== undefined && url !== '') {
       const token = env[TOKEN_ENV]
       endpoint = { url, ...(token ? { token } : {}), source: URL_ENV }
       return endpoint
     }
-    starting ??= startInProcess(ctx.cwd).finally(() => {
+    starting ??= startChild(ctx.cwd).finally(() => {
       starting = undefined
     })
     endpoint = await starting
     return endpoint
   }
 
-  async function startInProcess(cwd: string): Promise<Endpoint> {
+  /**
+   * Runs the proxy CLI under the system Node: omp is a compiled Bun executable whose resolver
+   * cannot load transform modules with native or ML dependencies from `node_modules`.
+   */
+  async function startChild(cwd: string): Promise<Endpoint> {
     const path = findProxyConfig({ cwd, home: deps.home })
     if (path === undefined) {
       const searched = configCandidates(cwd, deps.home).join(' or ')
@@ -150,8 +176,21 @@ export function createAnonController(deps: AnonControllerDeps): AnonController {
     if (options.defaultPipeline === undefined) {
       throw new Error(`${path} sets no defaultPipeline: the omp extension sends no pipeline header`)
     }
-    const proxy = await startProxy({ ...options, log: silentLogger })
-    return { url: proxy.url, pipeline: options.defaultPipeline, source: `in-process, config ${path}`, proxy }
+    const token = randomBytes(32).toString('base64url')
+    const node = env[NODE_ENV] || 'node'
+    const cli = deps.cliPath ?? fileURLToPath(new URL('../cli.mjs', import.meta.url))
+    const child = spawnChild(node, [cli, '--config', path, '--port', '0', '--host', '127.0.0.1', '--exit-with-stdin'], {
+      cwd,
+      env: { ...env, [TOKEN_ENV]: token },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })
+    const state = { exited: false }
+    child.on('exit', () => {
+      state.exited = true
+      if (endpoint?.child === state) endpoint = undefined
+    })
+    const url = await waitForListening(child, { node, token, timeoutMs: listenTimeoutMs })
+    return { url, token, pipeline: options.defaultPipeline, source: `child process ${child.pid}, config ${path}`, child: state }
   }
 
   function currentSessionId(ctx: OmpContext): string {
@@ -160,28 +199,13 @@ export function createAnonController(deps: AnonControllerDeps): AnonController {
   }
 
   /**
-   * Adopts the session id of a root session and returns the id it replaced, if any. The first
-   * session of the process is the root; later `session_start`s are subagents (headless, `print`
-   * mode) unless the session has a UI or runs in another mode.
+   * Adopts the session id of a root session. The first session of the process is the root;
+   * later `session_start`s are subagents (headless, `print` mode) unless the session has a UI
+   * or runs in another mode.
    */
-  function enterSession(ctx: OmpContext, root: boolean): string | undefined {
-    const previous = sessionId
-    if (previous === undefined) {
-      currentSessionId(ctx)
-      return undefined
-    }
-    if (root) sessionId = readSessionId(ctx) ?? previous
-    return sessionId === previous ? undefined : previous
-  }
-
-  async function dropProxySession(ctx: OmpContext, id: string): Promise<void> {
-    const proxy = endpoint?.proxy
-    if (proxy === undefined) return
-    try {
-      await proxy.dropSession(id)
-    } catch (err) {
-      ctx.ui.notify(`anon: could not drop proxy session ${id}: ${errorMessage(err)}`, 'warning')
-    }
+  function enterSession(ctx: OmpContext, root: boolean): void {
+    if (sessionId === undefined) currentSessionId(ctx)
+    else if (root) sessionId = readSessionId(ctx) ?? sessionId
   }
 
   function route(ctx: OmpContext, target: Endpoint): void {
@@ -326,9 +350,13 @@ export function createAnonController(deps: AnonControllerDeps): AnonController {
     return lines.join('\n')
   }
 
-  /** Session entry: rotate the proxy session for a new root, then (re-)apply routing when wanted. */
+  /**
+   * Session entry: rotate the proxy session for a new root, then (re-)apply routing when wanted.
+   * Rotation only switches the session header: the proxy keeps the old session's state in memory
+   * until it exits, and no request carries that id again.
+   */
   async function start(ctx: OmpContext, session: OmpSessionActions, root: boolean): Promise<void> {
-    const previous = enterSession(ctx, root)
+    enterSession(ctx, root)
     if (!wanted && readEnabled(statePath)) wanted = true
     if (wanted) {
       const failure = await activate(ctx, session)
@@ -337,7 +365,6 @@ export function createAnonController(deps: AnonControllerDeps): AnonController {
         ctx.ui.notify(refusalHint(), 'error')
       }
     }
-    if (previous !== undefined) await dropProxySession(ctx, previous)
     showStatus(ctx)
   }
 
@@ -452,6 +479,106 @@ function readEnabled(path: string): boolean {
   } catch {
     return false
   }
+}
+
+function spawnNode(command: string, args: readonly string[], options: ProxySpawnOptions): ProxyChildProcess {
+  return spawn(command, [...args], { cwd: options.cwd, env: options.env, stdio: [...options.stdio] })
+}
+
+/** The stderr lines a startup failure quotes. */
+const STDERR_TAIL = 10
+
+/**
+ * Resolves with the URL of the child's `listening <url>` line. A child that exits first, fails
+ * to spawn or stays silent past `timeoutMs` (it is then killed) rejects, quoting its last stderr
+ * lines with the token redacted. omp exiting kills the child; once listening, the child and its
+ * pipes no longer hold omp's event loop, and stdin stays open so the child sees omp go away.
+ */
+function waitForListening(child: ProxyChildProcess, how: { readonly node: string; readonly token: string; readonly timeoutMs: number }): Promise<string> {
+  const killOnExit = (): void => {
+    child.kill('SIGTERM')
+  }
+  process.on('exit', killOnExit)
+  const forgetExitHook = (): void => {
+    process.off('exit', killOnExit)
+  }
+  child.on('exit', forgetExitHook)
+  // Never write to stdin; a stray pipe error must not crash omp.
+  for (const stream of [child.stdin, child.stdout, child.stderr]) stream?.on('error', () => {})
+
+  const listening = Promise.withResolvers<string>()
+  const label = `the transform proxy child process (${how.node}, pid ${child.pid})`
+  const tail: string[] = []
+  let stderrPartial = ''
+  let stdout = ''
+  let settled = false
+
+  function stderrTail(): string {
+    const lines = [...tail, stderrPartial].filter((line) => line.trim() !== '').slice(-STDERR_TAIL)
+    return lines.length === 0 ? '(none)' : lines.map((line) => line.split(how.token).join('[token]')).join('\n')
+  }
+
+  function fail(message: string): void {
+    if (settled) return
+    settled = true
+    clearTimeout(timer)
+    listening.reject(new Error(message))
+  }
+
+  const timer = setTimeout(() => {
+    fail(`${label} did not print "listening" within ${duration(how.timeoutMs)} and was killed; last stderr lines:\n${stderrTail()}`)
+    child.kill('SIGKILL')
+  }, how.timeoutMs)
+
+  // After startup the handlers keep draining both pipes, so a chatty child never blocks on a full pipe.
+  child.stderr?.on('data', (chunk: Buffer | string) => {
+    if (settled) return
+    const lines = (stderrPartial + String(chunk)).split('\n')
+    stderrPartial = lines.pop() ?? ''
+    tail.push(...lines.map((line) => line.replace(/\r$/, '')))
+    tail.splice(0, Math.max(0, tail.length - STDERR_TAIL))
+  })
+
+  child.stdout?.on('data', (chunk: Buffer | string) => {
+    if (settled) return
+    const lines = (stdout + String(chunk)).split('\n')
+    stdout = lines.pop() ?? ''
+    for (const line of lines) {
+      const match = /^listening (\S+)$/.exec(line.trim())
+      if (match === null) continue
+      settled = true
+      clearTimeout(timer)
+      stdout = ''
+      child.unref()
+      for (const stream of [child.stdin, child.stdout, child.stderr]) (stream as { unref?: () => void } | null)?.unref?.()
+      listening.resolve(match[1]!)
+      return
+    }
+  })
+
+  child.on('exit', (code, signal) => {
+    if (settled) return
+    // Quote stderr only once the pipe has drained: `exit` can fire before the last chunks arrive.
+    const report = (): void =>
+      fail(`${label} exited with ${code === null ? `signal ${signal}` : `code ${code}`} before it was listening; last stderr lines:\n${stderrTail()}`)
+    const stderr = child.stderr
+    if (stderr === null || stderr.readableEnded || stderr.destroyed) report()
+    else {
+      stderr.once('end', report)
+      stderr.once('close', report)
+    }
+  })
+
+  child.on('error', (err) => {
+    forgetExitHook()
+    fail(`could not start the transform proxy with "${how.node}": ${err.message}; it runs under Node >= 22: put node on PATH or set ${NODE_ENV}`)
+  })
+
+  return listening.promise
+}
+
+function duration(ms: number): string {
+  return ms % 1000 === 0 ? `${ms / 1000} s` : `${ms} ms`
 }
 
 /** Every provider of the registry with the wire APIs of its models. */

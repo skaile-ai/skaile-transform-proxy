@@ -4,10 +4,17 @@ import { errorMessage } from '../log.ts'
 import { createAnonController, type AnonController } from './anon.ts'
 import type { OmpContext, OmpEventName, OmpExtensionApi } from './types.ts'
 
-export { createAnonController, defaultStatePath, type AnonController, type AnonControllerDeps } from './anon.ts'
+export {
+  createAnonController,
+  defaultStatePath,
+  type AnonController,
+  type AnonControllerDeps,
+  type ProxyChildProcess,
+  type ProxySpawnOptions,
+} from './anon.ts'
 export type * from './types.ts'
 
-/** omp re-imports the extension per session; the controller (proxy, recorded originals) is process-wide. */
+/** omp re-imports the extension per session; the controller (proxy child, recorded originals) is process-wide. */
 const CONTROLLER_KEY = Symbol.for('@skaile/transform-proxy/omp')
 
 /** Registers the `/anon` command and the event handlers on one session's extension API. */

@@ -60,12 +60,13 @@ Keys are exactly the option fields. An unknown top-level key is an error. Module
 ## CLI
 
 ```sh
-skaile-transform-proxy [--config <file>] [--port <n>] [--host <h>] [--token <t>]
+skaile-transform-proxy [--config <file>] [--port <n>] [--host <h>] [--token <t>] [--exit-with-stdin]
 ```
 
 - The token comes from `--token` or `SKAILE_TRANSFORM_PROXY_TOKEN`.
 - Without `--config`, the proxy reads `./.skaile/transform-proxy.yaml`, then `~/.config/skaile/transform-proxy.yaml`.
 - On start it prints `listening <url>`. It stops on SIGINT or SIGTERM.
+- `--exit-with-stdin` also stops it when its stdin closes. A parent process that spawns the proxy with a stdin pipe and never writes to it takes the proxy down when it exits, even on SIGKILL.
 
 ## Library
 
@@ -92,15 +93,16 @@ The package ships an [omp](https://omp.sh) extension (subpath `@skaile/transform
 omp plugin install @skaile/transform-proxy
 ```
 
-It adds the command `/anon on|off|status` and the footer status `anon on`, `anon off` or `anon error`.
+It adds the command `/anon on|off|status` and the footer status `anon on`, `anon off` or `anon error`. Unless `SKAILE_TRANSFORM_PROXY_URL` names a running proxy, it needs Node ≥ 22 on `PATH` (or its path in `SKAILE_TRANSFORM_PROXY_NODE`).
 
 - `/anon on` routes every provider of omp's model registry through the proxy: the provider's `baseUrl` becomes the proxy URL, and the original base URL travels in `x-skaile-transform-upstream`, next to `x-skaile-transform-session` (the omp session id) and the token. The provider's own headers and auth stay in place and are relayed.
   - With `SKAILE_TRANSFORM_PROXY_URL` (and `SKAILE_TRANSFORM_PROXY_TOKEN`) set, it uses that running proxy, and the proxy applies its `defaultPipeline`.
-  - Otherwise it starts one proxy inside the omp process, from the config lookup of the CLI (`./.skaile/transform-proxy.yaml`, then `~/.config/skaile/transform-proxy.yaml`). That config must set `defaultPipeline`. Without a config, `/anon on` refuses and says where to put one.
+  - Otherwise it starts one proxy per omp process as a child process: the system Node (`SKAILE_TRANSFORM_PROXY_NODE`, else `node` from `PATH`) runs this package's CLI with the config lookup of the CLI (`./.skaile/transform-proxy.yaml`, then `~/.config/skaile/transform-proxy.yaml`), `--port 0 --host 127.0.0.1 --exit-with-stdin` and a random token in `SKAILE_TRANSFORM_PROXY_TOKEN`, which every routed provider sends. That config must set `defaultPipeline`. Without a config, `/anon on` refuses and says where to put one. A child that exits before printing `listening <url>`, or stays silent for 60 s, fails `/anon on` with its last stderr lines.
+  - omp is a compiled Bun executable, and its resolver cannot load transform modules with native or ML dependencies (`onnxruntime-node`, `@huggingface/transformers`, `ibantools`) from `node_modules`; Node can. The child exits with omp: its stdin pipe closes when omp exits (SIGKILL included), and omp kills it on a normal exit. It does not keep omp's event loop alive. A child that dies later is replaced on the next turn.
   - Providers on a wire the proxy does not rewrite (Bedrock, Vertex, Gemini, agent bridges, providers without a base URL) are routed too, so the proxy refuses their requests: the setup fails closed. `/anon status` lists them as refused.
   - The session's active model is rebound to the re-routed one, so the next request already uses the new base URL. A rebind that fails is an activation failure: `/anon on` rolls the routes back, saves nothing and stays off. When anon is required, or a later turn's rebind fails while anon is on, the footer shows `anon error`.
 - While anon is on or in error, a `before_provider_request` handler checks every model request: a request whose model does not target the proxy gets its payload replaced with an empty object, so no conversation text leaves, and an error notice names the model. omp has no hook that cancels a provider request, and a throwing handler is only logged, so this replacement is the block.
-- The proxy session follows the root omp session: on `/new`, `/resume`, `/fork` (`session_switch`) and on a root `session_start` with a new session id, every provider is re-routed with the new `x-skaile-transform-session`, and the in-process proxy drops the old session. A `session_start` of a headless `print` session (how omp runs subagents) keeps the parent's id, so subagents share its pseudonyms.
+- The proxy session follows the root omp session: on `/new`, `/resume`, `/fork` (`session_switch`) and on a root `session_start` with a new session id, every provider is re-routed with the new `x-skaile-transform-session`. The proxy keeps the old session's state in memory until it exits; no request carries that id again. A `session_start` of a headless `print` session (how omp runs subagents) keeps the parent's id, so subagents share its pseudonyms.
 - `/anon off` restores the original base URLs and headers.
 - `/anon status` shows the state, the proxy URL and its source, the pipeline, the session id, and the routed and refused providers.
 - The enabled flag is saved in `skaile-transform-proxy.json` in omp's agent dir (`~/.omp/agent`; `SKAILE_TRANSFORM_PROXY_OMP_STATE` overrides the path) and re-applied when a session starts.

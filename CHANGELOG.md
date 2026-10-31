@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.3
+
+- omp extension: without `SKAILE_TRANSFORM_PROXY_URL`, `/anon on` starts the proxy as a child process under the system Node (`SKAILE_TRANSFORM_PROXY_NODE`, else `node` from `PATH`; Node ≥ 22) instead of inside omp. omp is a compiled Bun executable whose resolver cannot load transform modules with native or ML dependencies from `node_modules`: under omp 18.14.2, `/anon on` failed with `transform "anon": cannot load module @skaile/forge-anon/proxy: Cannot find package 'ibantools'`. The child runs this package's CLI with the found config, `--port 0 --host 127.0.0.1 --exit-with-stdin` and a random token, which every routed provider sends as `x-skaile-transform-token`. A child that exits before `listening <url>` or stays silent for 60 s fails `/anon on` with its last stderr lines (token redacted). The child exits with omp, does not keep omp's event loop alive, and is replaced on the next turn when it dies. A rotated-out proxy session is no longer dropped: the child keeps its state in memory until it exits, and no request carries that id again.
+- CLI: `--exit-with-stdin` stops the proxy when its stdin closes, so a parent that spawns it with a stdin pipe takes it down on exit, SIGKILL included.
+
 ## 0.2.2
 
 - Fail closed on malformed request bodies: the Anthropic, OpenAI chat and OpenAI responses walkers refuse a JSON body whose shape they cannot classify (a root that is not an object; a `system`, `messages`, `input`, `instructions`, message `content`, text, thinking, tool-call `arguments` or tool-result slot of an unexpected type) with 400 `unsupported_content` instead of forwarding it untransformed. Unknown part, block and item types still pass through.
