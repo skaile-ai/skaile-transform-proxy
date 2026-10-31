@@ -1,0 +1,49 @@
+# Publishes @skaile/transform-proxy at the version in package.json to npmjs when a
+# `v*` tag is pushed:  git tag v0.1.0 && git push origin v0.1.0
+#
+# Trusted publishing: npmjs trusts this workflow file (publish.yml in
+# skaile-ai/skaile-transform-proxy) and the job logs in with GitHub's OIDC token, so no npm
+# secret exists. Renaming this file breaks the trust; set it up again with
+#   npm trust github @skaile/transform-proxy --file <name>.yml --repository skaile-ai/skaile-transform-proxy --allow-publish
+name: publish
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  id-token: write # OIDC token for npm trusted publishing
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24 # bundles npm >= 11.5.1, the first with OIDC publish
+          registry-url: https://registry.npmjs.org
+
+      - name: Release precondition (tag = package.json version)
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "tag $GITHUB_REF_NAME does not match package.json version $version" >&2
+            exit 1
+          fi
+
+      - run: bun install --frozen-lockfile
+      - run: bun test
+
+      - name: Publish to npmjs (skipped when the version is already there)
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if npm view "@skaile/transform-proxy@$version" version >/dev/null 2>&1; then
+            echo "@skaile/transform-proxy@$version is already published"
+            exit 0
+          fi
+          npm publish --access public
