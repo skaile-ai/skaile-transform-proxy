@@ -295,14 +295,14 @@ describe('/anon command parsing', () => {
     await controller().command('maybe', ctx)
     expect(ctx.notes).toEqual([{ message: 'usage: /anon on|off|status', type: 'error' }])
     expect(registry.calls).toEqual([])
-    expect(ctx.statuses).toEqual(['anon off'])
+    expect(ctx.statuses).toEqual(['Ⱥ'])
   })
 
   test('verbs are trimmed and case-insensitive; an empty argument shows the status', async () => {
     const ctx = context(standardRegistry())
     const anon = controller()
     await anon.command('  ON ', ctx)
-    expect(ctx.statuses.at(-1)).toBe('anon on')
+    expect(ctx.statuses.at(-1)).toBe('A')
     await anon.command('', ctx)
     expect(lastNote(ctx)).toStartWith('anon on')
   })
@@ -328,7 +328,7 @@ describe('/anon on with SKAILE_TRANSFORM_PROXY_URL', () => {
     // No base URL to name as upstream: routed anyway, and the proxy refuses it.
     expect(registry.getProviderBaseUrl('vertex')).toBe('http://127.0.0.1:7001')
     expect(registry.getProviderHeaders('vertex')?.[UPSTREAM]).toBeUndefined()
-    expect(ctx.statuses).toEqual(['anon on'])
+    expect(ctx.statuses).toEqual(['A'])
     expect(lastNote(ctx)).toBe('anon on: 4 provider(s) routed through http://127.0.0.1:7001')
     expect(persisted()).toEqual({ enabled: true })
   })
@@ -447,7 +447,7 @@ describe('active model rebind', () => {
       expect(ctx.notes).toEqual([
         { message: 'anon: could not rebind the active model openai/openai-0 to the transform proxy', type: 'error' },
       ])
-      expect(ctx.statuses).toEqual(['anon off'])
+      expect(ctx.statuses).toEqual(['Ⱥ'])
       expect(existsSync(statePath)).toBe(false)
       expect(registry.calls.at(-1)).toBe('clear skaile-transform-proxy')
       expect(registry.getProviderBaseUrl('openai')).toBe('https://api.openai.com/v1')
@@ -465,7 +465,7 @@ describe('active model rebind', () => {
     const ctx = context(registry, { active: stale, setModelResult: false })
     const anon = controller({ ...ENV_PROXY, SKAILE_TRANSFORM_PROXY_MODE: 'required' })
     await anon.sessionStart(ctx)
-    expect(ctx.statuses).toEqual(['anon error'])
+    expect(ctx.statuses).toEqual(['A!'])
     expect(ctx.notes).toEqual([
       { message: 'anon: could not rebind the active model openai/openai-0 to the transform proxy', type: 'error' },
       { message: 'anon: required mode: model requests are refused until the transform proxy is routed (SKAILE_TRANSFORM_PROXY_MODE=required)', type: 'error' },
@@ -485,13 +485,13 @@ describe('active model rebind', () => {
     const stale = registry.find('openai', 'openai-0')
     const broken = context(registry, { active: stale, setModelResult: false })
     await anon.reapply(broken)
-    expect(broken.statuses).toEqual(['anon error'])
+    expect(broken.statuses).toEqual(['A!'])
     expect(broken.notes.map((note) => note.type)).toEqual(['error', 'error'])
     expect(registry.getProviderBaseUrl('anthropic')).toBe('https://api.anthropic.com')
     expect(anon.providerRequest(requestContext(broken, stale))).toEqual({})
     const healthy = context(registry, { active: stale })
     await anon.reapply(healthy)
-    expect(healthy.statuses).toEqual(['anon on'])
+    expect(healthy.statuses).toEqual(['A'])
     expect(anon.providerRequest(requestContext(healthy, healthy.model))).toBeUndefined()
   })
 })
@@ -533,7 +533,7 @@ describe('/anon off', () => {
     expect(registry.getProviderBaseUrl('anthropic')).toBe('https://api.anthropic.com')
     expect(registry.getProviderHeaders('anthropic')).toEqual({ 'x-team': 'a' })
     expect(registry.getProviderHeaders('openai')).toBeUndefined()
-    expect(ctx.statuses).toEqual(['anon on', 'anon off'])
+    expect(ctx.statuses).toEqual(['A', 'Ⱥ'])
     expect(lastNote(ctx)).toBe('anon off: original provider base URLs restored')
     expect(persisted()).toEqual({ enabled: false })
   })
@@ -562,7 +562,7 @@ describe('/anon off', () => {
     })
     expect(registry.calls.some((call) => call.startsWith('clear'))).toBe(false)
     expect(registry.getProviderBaseUrl('openai')).toBe('http://127.0.0.1:7001')
-    expect(ctx.statuses.at(-1)).toBe('anon on')
+    expect(ctx.statuses.at(-1)).toBe('A')
     expect(persisted()).toEqual({ enabled: true })
   })
 })
@@ -597,7 +597,7 @@ describe('session_start', () => {
     const ctx = context(registry)
     await controller().sessionStart(ctx)
     expect(registry.getProviderBaseUrl('anthropic')).toBe('http://127.0.0.1:7001')
-    expect(ctx.statuses).toEqual(['anon on'])
+    expect(ctx.statuses).toEqual(['A'])
   })
 
   test('stays off without a flag, or with a corrupt one, and shows the off status', async () => {
@@ -608,7 +608,7 @@ describe('session_start', () => {
     writeFileSync(statePath, '{not json')
     await controller().sessionStart(ctx)
     expect(registry.calls).toEqual([])
-    expect(ctx.statuses).toEqual(['anon off', 'anon off'])
+    expect(ctx.statuses).toEqual(['Ⱥ', 'Ⱥ'])
   })
 
   test('required mode forces routing on even when the flag says off', async () => {
@@ -618,7 +618,7 @@ describe('session_start', () => {
     const ctx = context(registry)
     await controller({ ...ENV_PROXY, SKAILE_TRANSFORM_PROXY_MODE: 'required' }).sessionStart(ctx)
     expect(registry.getProviderBaseUrl('openai')).toBe('http://127.0.0.1:7001')
-    expect(ctx.statuses).toEqual(['anon on'])
+    expect(ctx.statuses).toEqual(['A'])
   })
 
   test('required mode without a reachable proxy shows anon error and refuses model requests', async () => {
@@ -628,7 +628,7 @@ describe('session_start', () => {
     await anon.sessionStart(ctx)
     expect(ctx.notes.map((note) => note.type)).toEqual(['error', 'error'])
     expect(ctx.notes[1]?.message).toBe('anon: required mode: model requests are refused until the transform proxy is routed (SKAILE_TRANSFORM_PROXY_MODE=required)')
-    expect(ctx.statuses).toEqual(['anon error'])
+    expect(ctx.statuses).toEqual(['A!'])
     expect(anon.providerRequest(requestContext(ctx, registry.find('openai', 'openai-0')))).toEqual({})
     expect(lastNote(ctx)).toBe('anon: model request refused: the transform proxy is not available')
   })
@@ -650,7 +650,7 @@ describe('session rotation', () => {
     }
     // The active model is rebound to the re-projected one carrying the new id.
     expect(ctx.model?.headers?.[SESSION]).toBe('root-2')
-    expect(ctx.statuses.at(-1)).toBe('anon on')
+    expect(ctx.statuses.at(-1)).toBe('A')
   })
 
   test('a root session_start with a new id rotates too; a subagent session keeps the parent id', async () => {
@@ -711,7 +711,7 @@ describe('proxy child process', () => {
     // Once listening, the child no longer holds omp's event loop, but its stdin pipe stays open.
     expect(call.child.unrefs).toBe(1)
     expect(call.child.stdin.writableEnded).toBe(false)
-    expect(ctx.statuses).toEqual(['anon on'])
+    expect(ctx.statuses).toEqual(['A'])
     await anon.command('status', ctx)
     expect(lastNote(ctx)).toContain(`proxy: http://127.0.0.1:7123 (child process 4242, config ${path})`)
     expect(lastNote(ctx)).toContain('pipeline: plain')
@@ -753,7 +753,7 @@ describe('proxy child process', () => {
     ])
     expect(spawner.calls).toHaveLength(0)
     expect(registry.calls).toEqual([])
-    expect(ctx.statuses).toEqual(['anon off'])
+    expect(ctx.statuses).toEqual(['Ⱥ'])
     expect(existsSync(statePath)).toBe(false)
   })
 
@@ -784,7 +784,7 @@ describe('proxy child process', () => {
     expect(note.message).not.toContain('stderr line 3\n')
     expect(note.message).not.toContain(token)
     expect(registry.calls).toEqual([])
-    expect(ctx.statuses).toEqual(['anon off'])
+    expect(ctx.statuses).toEqual(['Ⱥ'])
     expect(existsSync(statePath)).toBe(false)
   })
 
@@ -805,7 +805,7 @@ describe('proxy child process', () => {
       vi.useRealTimers()
     }
     expect(lastNote(ctx)).toBe('anon: the transform proxy child process (node, pid 4242) did not print "listening" within 45 s and was killed; last stderr lines:\nloading model')
-    expect(ctx.statuses).toEqual(['anon off'])
+    expect(ctx.statuses).toEqual(['Ⱥ'])
   })
 
   test('a spawn error (node missing) says that the proxy needs Node on PATH or SKAILE_TRANSFORM_PROXY_NODE', async () => {
@@ -816,7 +816,7 @@ describe('proxy child process', () => {
     expect(lastNote(ctx)).toBe(
       'anon: could not start the transform proxy with "node": spawn node ENOENT; it runs under Node >= 22: put node on PATH or set SKAILE_TRANSFORM_PROXY_NODE',
     )
-    expect(ctx.statuses).toEqual(['anon off'])
+    expect(ctx.statuses).toEqual(['Ⱥ'])
   })
 
   test('a failed start is retried on the next on', async () => {
@@ -828,7 +828,7 @@ describe('proxy child process', () => {
     expect(lastNote(ctx)).toContain('exited with code 1 before it was listening; last stderr lines:\n(none)')
     await anon.command('on', ctx)
     expect(spawner.calls).toHaveLength(2)
-    expect(ctx.statuses).toEqual(['anon off', 'anon on'])
+    expect(ctx.statuses).toEqual(['Ⱥ', 'A'])
   })
 
   test('omp exiting kills the child; the exit hook goes away with the child', async () => {
@@ -886,7 +886,7 @@ describe('proxy child process under node', () => {
     const registry = standardRegistry()
     const ctx = context(registry)
     await anon.command('on', ctx)
-    expect(ctx.statuses).toEqual(['anon on'])
+    expect(ctx.statuses).toEqual(['A'])
     const url = registry.getProviderBaseUrl('anthropic')!
     expect(url).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/)
     const token = registry.getProviderHeaders('anthropic')![TOKEN]!

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.4
+
+- omp extension: the status is one glyph instead of a word: `A` (on), `Ⱥ` (crossed A, off), `A!` (error; was `anon on`, `anon off`, `anon error`). It fits omp's `status` status-line segment; the README shows the `statusLine` config that puts it into the main line.
+
 ## 0.2.3
 
 - omp extension: without `SKAILE_TRANSFORM_PROXY_URL`, `/anon on` starts the proxy as a child process under the system Node (`SKAILE_TRANSFORM_PROXY_NODE`, else `node` from `PATH`; Node ≥ 22) instead of inside omp. omp is a compiled Bun executable whose resolver cannot load transform modules with native or ML dependencies from `node_modules`: under omp 18.14.2, `/anon on` failed with `transform "anon": cannot load module @skaile/forge-anon/proxy: Cannot find package 'ibantools'`. The child runs this package's CLI with the found config, `--port 0 --host 127.0.0.1 --exit-with-stdin` and a random token, which every routed provider sends as `x-skaile-transform-token`. A child that exits before `listening <url>` or stays silent for 60 s fails `/anon on` with its last stderr lines (token redacted). The child exits with omp, does not keep omp's event loop alive, and is replaced on the next turn when it dies. A rotated-out proxy session is no longer dropped: the child keeps its state in memory until it exits, and no request carries that id again.
