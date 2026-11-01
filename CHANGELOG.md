@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.5
+
+- omp extension: the status is `🟢A` (on), `🔴A` (off), `🟠A` (error) instead of `A`, `Ⱥ`, `A!`. The crossed A was not legible in common terminal fonts, and omp strips ANSI colour from extension statuses, so the colour comes from an emoji.
+
 ## 0.2.4
 
 - omp extension: the status is one glyph instead of a word: `A` (on), `Ⱥ` (crossed A, off), `A!` (error; was `anon on`, `anon off`, `anon error`). It fits omp's `status` status-line segment; the README shows the `statusLine` config that puts it into the main line.

@@ -122,7 +122,7 @@ interface RegistryState {
  *
  * `wanted`: model requests must go through the proxy (required mode, or `/anon on`).
  * `enabled`: every provider is routed and the active model is rebound. `wanted` without
- * `enabled` is the error state: the status shows `A!` and `providerRequest` refuses
+ * `enabled` is the error state: the status shows `🟠A` and `providerRequest` refuses
  * every request that would bypass the proxy.
  */
 export function createAnonController(deps: AnonControllerDeps): AnonController {
@@ -324,9 +324,12 @@ export function createAnonController(deps: AnonControllerDeps): AnonController {
     return enabled ? 'on' : wanted ? 'error' : 'off'
   }
 
-  /** One glyph per state, so the status fits into omp's main status line: `A` on, `Ⱥ` (crossed A) off, `A!` error. */
+  /**
+   * Compact status for omp's main status line. omp strips ANSI colour from extension statuses and
+   * paints them in its accent colour, so the colour comes from an emoji: green on, red off, orange error.
+   */
   function showStatus(ctx: OmpContext): void {
-    ctx.ui.setStatus(STATUS_KEY, enabled ? 'A' : wanted ? 'A!' : 'Ⱥ')
+    ctx.ui.setStatus(STATUS_KEY, enabled ? '🟢A' : wanted ? '🟠A' : '🔴A')
   }
 
   function statusText(ctx: OmpContext): string {
