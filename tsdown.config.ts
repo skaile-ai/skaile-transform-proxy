@@ -6,5 +6,7 @@ export default defineConfig({
   format: 'esm',
   platform: 'node',
   dts: true,
-  shims: true
+  shims: true,
+  // Served by omp to the extension at runtime (src/omp/omp-runtime.d.ts); never bundled.
+  deps: { neverBundle: [/^@oh-my-pi\//] }
 })

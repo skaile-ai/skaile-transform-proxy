@@ -6,8 +6,8 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { PassThrough } from 'node:stream'
 import { fileURLToPath } from 'node:url'
-import anonExtension, { createAnonController, defaultStatePath, registerAnonExtension } from '../src/omp/index.ts'
-import type { AnonController, AnonControllerDeps, ProxySpawnOptions } from '../src/omp/index.ts'
+import anonExtension, { createAnonController, defaultStatePath, ompImageSending, registerAnonExtension } from '../src/omp/index.ts'
+import type { AnonController, AnonControllerDeps, ImageSending, ProxySpawnOptions } from '../src/omp/index.ts'
 import type {
   OmpAutocompleteItem,
   OmpContext,
@@ -679,6 +679,138 @@ describe('session rotation', () => {
     expect(spawner.calls[0]?.child.signals).toEqual([])
     expect(registry.getProviderBaseUrl('anthropic')).toBe('http://127.0.0.1:7123')
     expect(registry.getProviderHeaders('anthropic')?.[SESSION]).toBe('root-2')
+  })
+})
+
+/** An `ImageSending` that records each `setBlocked` call and answers `result`. */
+function fakeImages(result: boolean | 'throw' = true): ImageSending & { readonly calls: boolean[] } {
+  const calls: boolean[] = []
+  return {
+    calls,
+    async setBlocked(blocked) {
+      calls.push(blocked)
+      if (result === 'throw') throw new Error('settings store is read-only')
+      return result
+    },
+  }
+}
+
+describe('image sending', () => {
+  test('/anon on blocks images once and status says so; /anon off releases the block', async () => {
+    const images = fakeImages()
+    const anon = controller(ENV_PROXY, { images })
+    const ctx = context(standardRegistry())
+    await anon.command('on', ctx)
+    await anon.command('on', ctx)
+    expect(images.calls).toEqual([true])
+    await anon.command('status', ctx)
+    expect(lastNote(ctx)).toContain('\nimages: not sent (omp images.blockImages)\n')
+    await anon.command('off', ctx)
+    expect(images.calls).toEqual([true, false])
+    await anon.command('status', ctx)
+    expect(lastNote(ctx)).not.toContain('images:')
+  })
+
+  test('a failed /anon on leaves image sending alone', async () => {
+    const images = fakeImages()
+    const registry = standardRegistry()
+    const anon = controller(ENV_PROXY, { images })
+    await anon.command('on', context(registry, { active: registry.find('openai', 'openai-0'), setModelResult: false }))
+    expect(images.calls).toEqual([])
+  })
+
+  test('a persisted flag blocks images at session start; required mode blocks them even when routing fails', async () => {
+    mkdirSync(dirname(statePath), { recursive: true })
+    writeFileSync(statePath, '{"enabled":true}\n')
+    const persistedOn = fakeImages()
+    await controller(ENV_PROXY, { images: persistedOn }).sessionStart(context(standardRegistry()))
+    expect(persistedOn.calls).toEqual([true])
+
+    rmSync(statePath)
+    const required = fakeImages()
+    const ctx = context(standardRegistry())
+    await controller({ SKAILE_TRANSFORM_PROXY_MODE: 'required' }, { images: required }).sessionStart(ctx)
+    expect(ctx.statuses).toEqual(['🟠A'])
+    expect(required.calls).toEqual([true])
+  })
+
+  test('a host without a way to block images warns once, is not asked again and nothing is released', async () => {
+    const images = fakeImages(false)
+    const anon = controller(ENV_PROXY, { images })
+    const ctx = context(standardRegistry())
+    await anon.command('on', ctx)
+    await anon.command('status', ctx)
+    await anon.command('off', ctx)
+    await anon.command('on', ctx)
+    expect(images.calls).toEqual([true])
+    const warnings = ctx.notes.filter((note) => note.type === 'warning').map((note) => note.message)
+    expect(warnings).toEqual(['anon: this omp cannot stop image sending; the proxy refuses every request that carries an image'])
+  })
+
+  test('a failing block warns with the cause and is retried by the next command; nothing is released', async () => {
+    const images = fakeImages('throw')
+    const anon = controller(ENV_PROXY, { images })
+    const ctx = context(standardRegistry())
+    await anon.command('on', ctx)
+    expect(lastNote(ctx)).toBe('anon: could not stop image sending: settings store is read-only')
+    await anon.command('status', ctx)
+    await anon.command('off', ctx)
+    expect(images.calls).toEqual([true, true])
+  })
+})
+
+describe('ompImageSending', () => {
+  /** omp's settings registry with one `images.blockImages` handle that records its writes per scope. */
+  function fakeOmpRegistry(): { readonly module: unknown; readonly writes: string[]; readonly lookups: string[] } {
+    const writes: string[] = []
+    const lookups: string[] = []
+    const handle = {
+      override: (scope: { name: string }, value: unknown) => writes.push(`override ${scope.name} ${String(value)}`),
+      clearOverride: (scope: { name: string }) => writes.push(`clear ${scope.name}`),
+    }
+    return {
+      writes,
+      lookups,
+      module: {
+        lookup: (id: string) => {
+          lookups.push(id)
+          return id === 'images.blockImages' ? handle : undefined
+        },
+      },
+    }
+  }
+
+  function extensionApi(settings?: { name: string }): OmpExtensionApi {
+    return {
+      ...(settings === undefined ? {} : { pi: { settings } }),
+      registerCommand: () => {},
+      on: () => {},
+      setModel: async () => true,
+    }
+  }
+
+  test('overrides images.blockImages with true on the extension settings scope, then clears the override; the registry loads once', async () => {
+    const omp = fakeOmpRegistry()
+    let loads = 0
+    const images = ompImageSending(extensionApi({ name: 'settings' }), async () => {
+      loads++
+      return omp.module
+    })
+    expect(await images.setBlocked(true)).toBe(true)
+    expect(await images.setBlocked(false)).toBe(true)
+    expect(omp.writes).toEqual(['override settings true', 'clear settings'])
+    expect(omp.lookups).toEqual(['images.blockImages'])
+    expect(loads).toBe(1)
+  })
+
+  test('answers false without a settings scope, a loadable registry or the setting', async () => {
+    const omp = fakeOmpRegistry()
+    expect(await ompImageSending(extensionApi(), async () => omp.module).setBlocked(true)).toBe(false)
+    expect(omp.lookups).toEqual([])
+    const unloadable = ompImageSending(extensionApi({ name: 'settings' }), () => Promise.reject(new Error('Cannot find module')))
+    expect(await unloadable.setBlocked(true)).toBe(false)
+    expect(await ompImageSending(extensionApi({ name: 'settings' }), async () => ({ lookup: () => undefined })).setBlocked(true)).toBe(false)
+    expect(await ompImageSending(extensionApi({ name: 'settings' }), async () => ({})).setBlocked(true)).toBe(false)
   })
 })
 

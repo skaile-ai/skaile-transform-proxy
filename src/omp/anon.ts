@@ -56,6 +56,15 @@ export interface ProxyChildProcess {
   on(event: 'error', listener: (err: Error) => void): unknown
 }
 
+/**
+ * Image sending of the host. The proxy cannot anonymize images and refuses every request that
+ * carries one; omp resends the whole history each turn, so one screenshot would block the session.
+ */
+export interface ImageSending {
+  /** `true` stops images from reaching the provider, `false` restores the user's setting. Resolves `false` when the host offers no way to do it; that answer is final. */
+  setBlocked(blocked: boolean): Promise<boolean>
+}
+
 export interface AnonControllerDeps {
   readonly env: Readonly<Record<string, string | undefined>>
   readonly home: string
@@ -67,6 +76,8 @@ export interface AnonControllerDeps {
   readonly cliPath?: string
   /** How long the child may take to print `listening <url>`. Default: 60 s (transform modules may load ML models). */
   readonly listenTimeoutMs?: number
+  /** Blocked while anon is wanted (on, error or required), released by `/anon off`. Default: none. */
+  readonly images?: ImageSending
 }
 
 export interface AnonController {
@@ -134,6 +145,10 @@ export function createAnonController(deps: AnonControllerDeps): AnonController {
   const registries = new WeakMap<OmpModelRegistry, RegistryState>()
   let wanted = required
   let enabled = false
+  /** Whether this controller holds the image block; only then does it release it. */
+  let imagesBlocked = false
+  /** The host answered that it cannot block images; asked once, warned once. */
+  let imagesUnsupported = false
   let endpoint: Endpoint | undefined
   let starting: Promise<Endpoint> | undefined
   let sessionId: string | undefined
@@ -324,6 +339,26 @@ export function createAnonController(deps: AnonControllerDeps): AnonController {
     return enabled ? 'on' : wanted ? 'error' : 'off'
   }
 
+  /** Follows `wanted`: images are blocked while model requests must go through the proxy. */
+  async function syncImages(ctx: OmpContext): Promise<void> {
+    const images = deps.images
+    if (images === undefined || imagesUnsupported || imagesBlocked === wanted) return
+    let done: boolean
+    try {
+      done = await images.setBlocked(wanted)
+    } catch (err) {
+      // A failed write may succeed on the next command.
+      ctx.ui.notify(`anon: could not ${wanted ? 'stop' : 'restore'} image sending: ${errorMessage(err)}`, 'warning')
+      return
+    }
+    if (done) {
+      imagesBlocked = wanted
+      return
+    }
+    imagesUnsupported = true
+    if (wanted) ctx.ui.notify('anon: this omp cannot stop image sending; the proxy refuses every request that carries an image', 'warning')
+  }
+
   /**
    * Compact status for omp's main status line. omp strips ANSI colour from extension statuses and
    * paints them in its accent colour, so the colour comes from an emoji: green on, red off, orange error.
@@ -342,6 +377,7 @@ export function createAnonController(deps: AnonControllerDeps): AnonController {
       lines.push(`pipeline: ${endpoint.pipeline ?? 'the proxy default'}`)
     }
     if (sessionId !== undefined) lines.push(`session: ${sessionId}`)
+    if (imagesBlocked) lines.push('images: not sent (omp images.blockImages)')
     const routed = [...state.routed.keys()].sort()
     const refused = routed.flatMap((provider) => {
       const reason = refusalReason(apis.get(provider), state.originals.get(provider))
@@ -369,6 +405,7 @@ export function createAnonController(deps: AnonControllerDeps): AnonController {
         ctx.ui.notify(refusalHint(), 'error')
       }
     }
+    await syncImages(ctx)
     showStatus(ctx)
   }
 
@@ -423,6 +460,7 @@ export function createAnonController(deps: AnonControllerDeps): AnonController {
         default:
           ctx.ui.notify(USAGE, 'error')
       }
+      await syncImages(ctx)
       showStatus(ctx)
     },
 

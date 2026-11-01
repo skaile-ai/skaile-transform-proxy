@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.6
+
+- omp extension: while anon is on, in error or required, images are not sent. The extension sets omp's `images.blockImages` as a runtime override (never persisted), so omp replaces every image in the request, history included, with `Image reading is disabled.`; `/anon off` drops the override. Before, a screenshot from a browser tool made the proxy refuse every later request of the session with 400 `unsupported_content` ("Anthropic image content cannot be transformed"). `/anon status` lists `images: not sent`. An omp without the settings registry gets one warning, and the proxy keeps refusing images.
+
 ## 0.2.5
 
 - omp extension: the status is `🟢A` (on), `🔴A` (off), `🟠A` (error) instead of `A`, `Ⱥ`, `A!`. The crossed A was not legible in common terminal fonts, and omp strips ANSI colour from extension statuses, so the colour comes from an emoji.

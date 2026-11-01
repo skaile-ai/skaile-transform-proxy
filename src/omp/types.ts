@@ -68,6 +68,8 @@ export interface OmpSessionActions {
 }
 
 export interface OmpExtensionApi extends OmpSessionActions {
+  /** omp's package exports; `settings` is the scope its setting handles read and override. */
+  readonly pi?: { readonly settings?: unknown }
   registerCommand(
     name: string,
     options: {
