@@ -39,7 +39,7 @@ export interface TransformProxy {
   /**
    * Host-only, in-process: each stage's `inspect()` result of the session's pipeline instance, keyed by transform id.
    * `{}` when the session or pipeline is unknown, the instance is not built, or its build failed.
-   * Never builds an instance or creates session state; there is no HTTP route for it.
+   * Never builds an instance or creates session state; there is no HTTP route for it. Rejects when a stage's `inspect()` throws.
    */
   inspect(sessionId: string, pipelineId?: string): Promise<Record<string, unknown>>
   close(): Promise<void>
