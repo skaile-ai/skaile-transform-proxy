@@ -80,6 +80,43 @@ describe('composeTransforms', () => {
     expect(errors[0]).toContain('boom')
   })
 
+  test('knownOriginals is absent when no stage has it', () => {
+    expect(composeTransforms([replacer(), replacer()]).knownOriginals).toBeUndefined()
+    expect(composeTransforms([]).knownOriginals).toBeUndefined()
+  })
+
+  test('knownOriginals is the union over stages, deduped by kind and value; a throwing stage is logged and skipped', () => {
+    const errors: string[] = []
+    const log: Logger = { debug() {}, info() {}, warn() {}, error: (msg: string) => void errors.push(msg) }
+    const a: Transform = {
+      ...replacer(),
+      knownOriginals: () => [
+        { kind: 'person', value: 'Alice Smith' },
+        { kind: 'city', value: 'Ulm' },
+      ],
+    }
+    const failing: Transform = {
+      ...replacer(),
+      knownOriginals: () => {
+        throw new Error('boom')
+      },
+    }
+    const b: Transform = {
+      ...replacer(),
+      *knownOriginals() {
+        yield { kind: 'person', value: 'Alice Smith' }
+        yield { kind: 'surname', value: 'Smith' }
+      },
+    }
+    const chain = composeTransforms([a, failing, replacer(), b], log)
+    expect([...(chain.knownOriginals?.() ?? [])]).toEqual([
+      { kind: 'person', value: 'Alice Smith' },
+      { kind: 'city', value: 'Ulm' },
+      { kind: 'surname', value: 'Smith' },
+    ])
+    expect(errors).toEqual(['transform knownOriginals failed: boom'])
+  })
+
   test('a stage that holds a tail: the tail is flushed through the stages below it', () => {
     // Stage 2 (inbound first) turns "Ali" into "P1"; stage 1 turns "P1" into "Alice".
     const chain = composeTransforms([replacer({ inbound: { P1: 'Alice' } }), replacer({ inbound: { Ali: 'P1' } })])

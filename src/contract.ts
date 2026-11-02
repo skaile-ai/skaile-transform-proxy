@@ -28,6 +28,11 @@ export interface Transform {
   dispose?(): void | Promise<void>
   /** Host-only state of this instance (e.g. the anon mapping), read through TransformProxy.inspect. Never called by the walkers, never sent anywhere. */
   inspect?(): unknown
+  /**
+   * Originals this instance has already replaced in this session (forge-anon: its mapping), each with its kind.
+   * Used only by the proxy's leak check, which reports kind and JSON path, never the value; never sent anywhere.
+   */
+  knownOriginals?(): Iterable<{ readonly kind: string; readonly value: string }>
 }
 
 export interface SessionFact {

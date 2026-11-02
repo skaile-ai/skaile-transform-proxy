@@ -7,6 +7,7 @@ import {
   type Logger,
   type TraceEvent,
   type TraceSink,
+  type TransformModule,
   type TransformProxy,
 } from '../src/index.ts'
 import { scriptedModule, startFakeUpstream, type FakeUpstream } from './support.ts'
@@ -95,8 +96,21 @@ describe('leak check in the proxy', () => {
     readonly args: unknown[]
   }
 
-  async function start(trace?: TraceSink): Promise<{ proxy: TransformProxy; logged: Logged[] }> {
-    const { module } = scriptedModule()
+  async function start(
+    trace?: TraceSink,
+    originals?: () => Iterable<{ kind: string; value: string }>,
+  ): Promise<{ proxy: TransformProxy; logged: Logged[] }> {
+    const scripted = scriptedModule().module
+    const module: TransformModule =
+      originals === undefined
+        ? scripted
+        : {
+            id: scripted.id,
+            open: async (config, ctx) => {
+              const factory = await scripted.open(config, ctx)
+              return async (session) => ({ ...(await factory(session)), knownOriginals: originals })
+            },
+          }
     const logged: Logged[] = []
     const log: Logger = {
       debug: (...args) => logged.push({ level: 'debug', args }),
@@ -164,6 +178,33 @@ describe('leak check in the proxy', () => {
     expect((await send(proxy.url)).status).toBe(200)
     proxy.session('s1').publisher('crm').publish([{ kind: 'person', value: 'Alice' }])
     // `Alice` survives only inside `tools`, so that is the one finding; messages carry `P1`.
+    expect((await send(proxy.url)).status).toBe(200)
+    const warns = logged.filter((entry) => entry.level === 'warn')
+    expect(warns.map((entry) => entry.args[1])).toEqual([{ sessionId: 's1', route: 'anthropic.messages', leaks: LEAKS }])
+  })
+
+  test('an original the pipeline reports via knownOriginals is found in tools with source pipeline, never the value', async () => {
+    const { proxy, logged } = await start(undefined, () => [{ kind: 'person', value: 'Alice Smith' }])
+    expect((await send(proxy.url)).status).toBe(200)
+    const warns = logged.filter((entry) => entry.level === 'warn')
+    expect(warns).toEqual([
+      {
+        level: 'warn',
+        args: [
+          'transform proxy: known original sent upstream',
+          { sessionId: 's1', route: 'anthropic.messages', leaks: [{ kind: 'person', source: 'pipeline', at: 'tools[0].description' }] },
+        ],
+      },
+    ])
+    expect(JSON.stringify(logged)).not.toContain('Alice Smith')
+    expect(upstream.requests).toHaveLength(1)
+  })
+
+  test('a throwing knownOriginals does not fail the request; the facts are still checked', async () => {
+    const { proxy, logged } = await start(undefined, () => {
+      throw new Error('boom')
+    })
+    proxy.session('s1').publisher('crm').publish([{ kind: 'person', value: 'Alice Smith' }])
     expect((await send(proxy.url)).status).toBe(200)
     const warns = logged.filter((entry) => entry.level === 'warn')
     expect(warns.map((entry) => entry.args[1])).toEqual([{ sessionId: 's1', route: 'anthropic.messages', leaks: LEAKS }])

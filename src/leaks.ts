@@ -1,4 +1,4 @@
-import type { SessionFacts, TraceLeak } from './contract.ts'
+import type { SessionFacts, TraceLeak, Transform } from './contract.ts'
 
 /** A value the proxy knows to be an original (a session fact, or something a transform replaced). */
 export interface KnownOriginal {
@@ -11,9 +11,21 @@ export interface KnownOriginal {
 const MIN_LEAK_LENGTH = 3
 const PLAIN_KEY = /^[A-Za-z_$][\w$]*$/
 
-/** The values the leak check compares against: the session's facts, each with its publisher as source. */
-export function knownOriginals(facts: SessionFacts): KnownOriginal[] {
-  return facts.list().map(({ kind, source, value }) => ({ kind, source, value }))
+/**
+ * The values the leak check compares against: the session's facts, each with its publisher as source, plus what the
+ * pipeline instance reports via `knownOriginals()` as source `pipeline`. If that throws, only the facts are returned.
+ */
+export function knownOriginals(facts: SessionFacts, instance?: Transform): KnownOriginal[] {
+  const out: KnownOriginal[] = facts.list().map(({ kind, source, value }) => ({ kind, source, value }))
+  if (instance?.knownOriginals === undefined) return out
+  try {
+    const fromPipeline: KnownOriginal[] = []
+    for (const { kind, value } of instance.knownOriginals()) fromPipeline.push({ kind, source: 'pipeline', value })
+    out.push(...fromPipeline)
+  } catch {
+    // A failing transform must not break the request; the facts are still checked.
+  }
+  return out
 }
 
 /**

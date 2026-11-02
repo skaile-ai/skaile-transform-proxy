@@ -39,7 +39,30 @@ export function composeTransforms(stages: readonly Transform[], log: Logger = si
         }
       }
     },
+    ...(stages.some((stage) => stage.knownOriginals !== undefined)
+      ? { knownOriginals: () => unionKnownOriginals(stages, log) }
+      : {}),
   }
+}
+
+/** The originals of every stage, deduped by kind and value; a stage that throws is logged and skipped. */
+function unionKnownOriginals(stages: readonly Transform[], log: Logger): { kind: string; value: string }[] {
+  const out: { kind: string; value: string }[] = []
+  const seen = new Set<string>()
+  for (const stage of stages) {
+    if (stage.knownOriginals === undefined) continue
+    try {
+      for (const { kind, value } of stage.knownOriginals()) {
+        const key = JSON.stringify([kind, value])
+        if (seen.has(key)) continue
+        seen.add(key)
+        out.push({ kind, value })
+      }
+    } catch (err) {
+      log.error(`transform knownOriginals failed: ${errorMessage(err)}`)
+    }
+  }
+  return out
 }
 
 /**

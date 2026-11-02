@@ -227,7 +227,7 @@ export async function createTransformProxy(options: TransformProxyOptions): Prom
     }
 
     // Always on, trace or not: warn with kind/source/path only, never the value, and never block the request.
-    const leaks = findLeaks(rewritten, knownOriginals(state.facts.facts))
+    const leaks = findLeaks(rewritten, knownOriginals(state.facts.facts, instance))
     if (leaks.length > 0) log.warn('transform proxy: known original sent upstream', { sessionId, route: route.name, leaks })
 
     // Shared by this request's request/response/error trace lines; `startedAt` gives their durationMs.
