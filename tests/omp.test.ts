@@ -1056,6 +1056,72 @@ describe('proxy child process', () => {
     expect(registry.getProviderBaseUrl('openai')).toBe('http://127.0.0.1:7102')
     expect(registry.getProviderHeaders('openai')?.[TOKEN]).toBe(spawner.calls[1]!.options.env.SKAILE_TRANSFORM_PROXY_TOKEN)
   })
+
+  /** A stderr line as the proxy CLI prints its leak warning. */
+  function leakLine(sessionId: string, leaks: readonly Record<string, string>[], route = 'anthropic.messages'): string {
+    return `[transform-proxy warn] transform proxy: known original sent upstream ${JSON.stringify({ sessionId, route, leaks })}\n`
+  }
+
+  /** Writes `text` to the child's stderr and waits until the controller's handler (registered first) has seen it. */
+  async function writeStderr(child: FakeChild, text: string): Promise<void> {
+    const seen = once(child.stderr, 'data')
+    child.stderr.write(text)
+    await seen
+  }
+
+  function warnings(ctx: FakeContext): string[] {
+    return ctx.notes.filter((note) => note.type === 'warning').map((note) => note.message)
+  }
+
+  test('leak warnings on stderr after listening become one warning per session and kind, without the value', async () => {
+    writeConfig(root)
+    const spawner = fakeSpawner()
+    const anon = controller({}, { spawnChild: spawner.spawnChild, cliPath: CLI })
+    const ctx = context(standardRegistry())
+    await anon.command('on', ctx)
+    const child = spawner.calls[0]!.child
+    // Startup unrefs the child and every pipe, so reading stderr afterwards does not hold omp's event loop.
+    expect(child.unrefs).toBe(1)
+
+    // The `value` field is hostile input: the proxy never prints one, and the notice must not repeat it.
+    const person = { kind: 'person', source: 'crm', at: 'tools[0].description', value: 'Alice Smith' }
+    const line = leakLine('s1', [person, { kind: 'person', source: 'crm', at: 'system' }])
+    await writeStderr(child, line + line.slice(0, 20))
+    await writeStderr(child, `${line.slice(20)}${leakLine('s1', [{ kind: 'email', source: 'crm', at: 'messages[3].content[0].text' }], 'openai.chat')}`)
+
+    expect(warnings(ctx)).toEqual([
+      'anon: a known person value was sent to the provider in clear text (at tools[0].description, route anthropic.messages). Value not shown.',
+      'anon: a known email value was sent to the provider in clear text (at messages[3].content[0].text, route openai.chat). Value not shown.',
+    ])
+    expect(JSON.stringify(ctx.notes)).not.toContain('Alice')
+
+    // Another session is noticed on its own.
+    await writeStderr(child, leakLine('s2', [{ kind: 'person', source: 'crm', at: 'system' }]))
+    expect(warnings(ctx)).toHaveLength(3)
+  })
+
+  test('malformed leak lines and other stderr output notify nothing', async () => {
+    writeConfig(root)
+    const spawner = fakeSpawner()
+    const anon = controller({}, { spawnChild: spawner.spawnChild, cliPath: CLI })
+    const ctx = context(standardRegistry())
+    await anon.command('on', ctx)
+    const child = spawner.calls[0]!.child
+    const marker = '[transform-proxy warn] transform proxy: known original sent upstream'
+    await writeStderr(
+      child,
+      [
+        `${marker} {not json`,
+        `${marker} {"sessionId":"s1","route":"anthropic.messages"}`,
+        `${marker} {"sessionId":"s1","route":"anthropic.messages","leaks":[{"kind":7,"at":"system"}]}`,
+        `${marker} {"sessionId":"s1","route":"anthropic.messages","leaks":[]}`,
+        `${marker}`,
+        '[transform-proxy info] listening elsewhere',
+        '',
+      ].join('\n'),
+    )
+    expect(warnings(ctx)).toEqual([])
+  })
 })
 
 describe('proxy child process under node', () => {

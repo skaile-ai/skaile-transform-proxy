@@ -172,6 +172,8 @@ export function createAnonController(deps: AnonControllerDeps): AnonController {
   let endpoint: Endpoint | undefined
   let starting: Promise<Endpoint> | undefined
   let sessionId: string | undefined
+  /** The context of the latest proxy-bound hook; leak notices of the proxy child go to its UI. */
+  let uiCtx: OmpContext | undefined
 
   function stateOf(registry: OmpModelRegistry): RegistryState {
     let state = registries.get(registry)
@@ -183,6 +185,7 @@ export function createAnonController(deps: AnonControllerDeps): AnonController {
   }
 
   async function resolveEndpoint(ctx: OmpContext): Promise<Endpoint> {
+    uiCtx = ctx
     if (endpoint !== undefined && endpoint.child?.exited !== true) return endpoint
     const url = env[URL_ENV]
     if (url !== undefined && url !== '') {
@@ -224,7 +227,7 @@ export function createAnonController(deps: AnonControllerDeps): AnonController {
       state.exited = true
       if (endpoint?.child === state) endpoint = undefined
     })
-    const url = await waitForListening(child, { node, token, timeoutMs: listenTimeoutMs })
+    const url = await waitForListening(child, { node, token, timeoutMs: listenTimeoutMs, onLeak: leakNotifier() })
     return {
       url,
       token,
@@ -232,6 +235,24 @@ export function createAnonController(deps: AnonControllerDeps): AnonController {
       source: `child process ${child.pid}, config ${path}`,
       child: state,
       ...(options.trace === undefined ? {} : { traceDir: options.trace.dir }),
+    }
+  }
+
+  /** One child's leak warnings as notices: once per session and kind for the child's life, never with the value. */
+  function leakNotifier(): (report: LeakReport) => void {
+    const noticed = new Set<string>()
+    return (report) => {
+      const firstAt = new Map<string, string>()
+      for (const leak of report.leaks) if (!firstAt.has(leak.kind)) firstAt.set(leak.kind, leak.at)
+      for (const [kind, at] of firstAt) {
+        const key = JSON.stringify([report.sessionId, kind])
+        if (noticed.has(key)) continue
+        noticed.add(key)
+        uiCtx?.ui.notify(
+          `anon: a known ${kind} value was sent to the provider in clear text (at ${at}, route ${report.route}). Value not shown.`,
+          'warning',
+        )
+      }
     }
   }
 
@@ -528,6 +549,7 @@ export function createAnonController(deps: AnonControllerDeps): AnonController {
     },
 
     providerRequest(ctx) {
+      uiCtx = ctx
       if (!wanted) return undefined
       let reason: string | undefined
       try {
@@ -567,14 +589,52 @@ function spawnNode(command: string, args: readonly string[], options: ProxySpawn
 
 /** The stderr lines a startup failure quotes. */
 const STDERR_TAIL = 10
+/** An unterminated stderr line longer than this is dropped, so a child that never prints a newline cannot grow omp's memory. */
+const STDERR_LINE_MAX = 65_536
+/** The proxy's leak warning (`log.warn` with `{ sessionId, route, leaks }`, printed as JSON after the message). */
+const LEAK_MARKER = 'transform proxy: known original sent upstream'
+
+/** What a leak warning of the proxy child says; only metadata, the proxy never logs the value. */
+interface LeakReport {
+  readonly sessionId: string
+  readonly route: string
+  readonly leaks: readonly { readonly kind: string; readonly at: string }[]
+}
+
+/** The leak report on one stderr line of the proxy child; `undefined` for any other or malformed line. */
+function parseLeakLine(line: string): LeakReport | undefined {
+  const index = line.indexOf(LEAK_MARKER)
+  if (index === -1) return undefined
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(line.slice(index + LEAK_MARKER.length))
+  } catch {
+    return undefined
+  }
+  if (typeof parsed !== 'object' || parsed === null) return undefined
+  const { sessionId, route, leaks } = parsed as Record<string, unknown>
+  if (typeof sessionId !== 'string' || typeof route !== 'string' || !Array.isArray(leaks)) return undefined
+  const out: { kind: string; at: string }[] = []
+  for (const leak of leaks) {
+    if (typeof leak !== 'object' || leak === null) return undefined
+    const { kind, at } = leak as Record<string, unknown>
+    if (typeof kind !== 'string' || typeof at !== 'string') return undefined
+    out.push({ kind, at })
+  }
+  return out.length === 0 ? undefined : { sessionId, route, leaks: out }
+}
 
 /**
  * Resolves with the URL of the child's `listening <url>` line. A child that exits first, fails
  * to spawn or stays silent past `timeoutMs` (it is then killed) rejects, quoting its last stderr
  * lines with the token redacted. omp exiting kills the child; once listening, the child and its
  * pipes no longer hold omp's event loop, and stdin stays open so the child sees omp go away.
+ * After startup every leak warning on stderr goes to `onLeak`.
  */
-function waitForListening(child: ProxyChildProcess, how: { readonly node: string; readonly token: string; readonly timeoutMs: number }): Promise<string> {
+function waitForListening(
+  child: ProxyChildProcess,
+  how: { readonly node: string; readonly token: string; readonly timeoutMs: number; readonly onLeak: (report: LeakReport) => void },
+): Promise<string> {
   const killOnExit = (): void => {
     child.kill('SIGTERM')
   }
@@ -612,11 +672,22 @@ function waitForListening(child: ProxyChildProcess, how: { readonly node: string
 
   // After startup the handlers keep draining both pipes, so a chatty child never blocks on a full pipe.
   child.stderr?.on('data', (chunk: Buffer | string) => {
-    if (settled) return
     const lines = (stderrPartial + String(chunk)).split('\n')
     stderrPartial = lines.pop() ?? ''
-    tail.push(...lines.map((line) => line.replace(/\r$/, '')))
-    tail.splice(0, Math.max(0, tail.length - STDERR_TAIL))
+    if (!settled) {
+      tail.push(...lines.map((line) => line.replace(/\r$/, '')))
+      tail.splice(0, Math.max(0, tail.length - STDERR_TAIL))
+      return
+    }
+    if (stderrPartial.length > STDERR_LINE_MAX) stderrPartial = ''
+    for (const line of lines) {
+      const report = parseLeakLine(line)
+      if (report === undefined) continue
+      // A throw here would surface as an uncaught exception in omp.
+      try {
+        how.onLeak(report)
+      } catch {}
+    }
   })
 
   child.stdout?.on('data', (chunk: Buffer | string) => {

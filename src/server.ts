@@ -3,6 +3,7 @@ import { createServer, type IncomingHttpHeaders, type IncomingMessage, type Serv
 import type { AddressInfo } from 'node:net'
 import { composeTransforms } from './chain.ts'
 import type { Logger, SessionFactPublisher, SessionFacts, TraceEvent, TraceSink, Transform } from './contract.ts'
+import { findLeaks, knownOriginals } from './leaks.ts'
 import { errorMessage, silentLogger } from './log.ts'
 import { openTransforms, type TransformSpec } from './modules.ts'
 import { classify } from './routes.ts'
@@ -75,6 +76,15 @@ const RESPONSE_SKIP: Record<string, true> = {
   'set-cookie': true,
 }
 
+/** Upstream error bodies in the trace are cut to this many characters. */
+const ERROR_TRACE_CHARS = 4096
+
+/** One proxied request's trace state: `base` is shared by its request, response and error lines. */
+interface RequestTrace {
+  readonly startedAt: number
+  readonly base: Pick<TraceEvent, 'requestId' | 'sessionId' | 'pipeline' | 'route' | 'upstream' | 'model'>
+}
+
 export async function createTransformProxy(options: TransformProxyOptions): Promise<TransformProxy> {
   const log = options.log ?? silentLogger
   const host = options.host ?? '127.0.0.1'
@@ -105,6 +115,20 @@ export async function createTransformProxy(options: TransformProxyOptions): Prom
     } catch (err) {
       log.error(`transform proxy: trace sink failed: ${errorMessage(err)}`)
     }
+  }
+
+  /** Records this request's single response or error line; a no-op without a trace. */
+  function recordReply(trace: RequestTrace | undefined, phase: 'response' | 'error', status: number, content: unknown): void {
+    if (trace === undefined) return
+    recordTrace({
+      ...trace.base,
+      at: new Date().toISOString(),
+      phase,
+      status,
+      durationMs: Date.now() - trace.startedAt,
+      content,
+      leaks: [],
+    })
   }
 
   async function buildInstance(state: SessionState, sessionId: string, pipelineId: string): Promise<Transform> {
@@ -202,6 +226,10 @@ export async function createTransformProxy(options: TransformProxyOptions): Prom
       return sendError(res, 502, 'transform_failed', errorMessage(err))
     }
 
+    // Always on, trace or not: warn with kind/source/path only, never the value, and never block the request.
+    const leaks = findLeaks(rewritten, knownOriginals(state.facts.facts))
+    if (leaks.length > 0) log.warn('transform proxy: known original sent upstream', { sessionId, route: route.name, leaks })
+
     // Shared by this request's request/response/error trace lines; `startedAt` gives their durationMs.
     const trace =
       options.trace === undefined
@@ -223,12 +251,12 @@ export async function createTransformProxy(options: TransformProxyOptions): Prom
         at: new Date(trace.startedAt).toISOString(),
         phase: 'request',
         content: requestDelta(rewritten, state.traced),
-        leaks: [],
+        leaks,
       })
     }
 
-    const upstreamRes = await fetchUpstream(res, forwardTo, method, headers, JSON.stringify(rewritten))
-    return relayUpstream(res, upstreamRes, route.rewriteResponse ? { wire: route.wire, ctx } : undefined)
+    const upstreamRes = await fetchUpstream(res, forwardTo, method, headers, JSON.stringify(rewritten), trace)
+    return relayUpstream(res, upstreamRes, route.rewriteResponse ? { wire: route.wire, ctx } : undefined, trace)
   }
 
   async function fetchUpstream(
@@ -237,34 +265,74 @@ export async function createTransformProxy(options: TransformProxyOptions): Prom
     method: string,
     headers: Headers,
     body: string | undefined,
+    trace?: RequestTrace,
   ): Promise<Response | undefined> {
     try {
       return await fetch(target, { method, headers, body, redirect: 'manual' })
     } catch (err) {
+      recordReply(trace, 'error', 502, errorMessage(err))
       sendError(res, 502, 'upstream_unreachable', errorMessage(err))
       return undefined
     }
   }
 
-  /** Relays an upstream response. With `rewrite`, a 2xx JSON or SSE body is restored on the way back. */
+  /**
+   * Relays an upstream response. With `rewrite`, a 2xx JSON or SSE body is restored on the way back. With `trace`
+   * (wire routes only), the reply before restore is recorded as exactly one response or error line.
+   */
   async function relayUpstream(
     res: ServerResponse,
     upstreamRes: Response | undefined,
     rewrite: { readonly wire: WireWalker; readonly ctx: WireContext } | undefined,
+    trace?: RequestTrace,
   ): Promise<void> {
     if (upstreamRes === undefined) return
     // Media types are case-insensitive (RFC 9110 §8.3.1).
     const contentType = (upstreamRes.headers.get('content-type') ?? '').toLowerCase()
     const headers = relayHeaders(upstreamRes.headers)
 
-    if (rewrite !== undefined && upstreamRes.ok && contentType.startsWith('text/event-stream')) {
-      return pipeStream(res, upstreamRes, headers, rewrite.wire.stream(rewrite.ctx), log)
+    if (trace !== undefined && !upstreamRes.ok) {
+      // Read once: the same bytes go to the trace and, unchanged, to the client.
+      const bytes = Buffer.from(await upstreamRes.arrayBuffer())
+      recordReply(trace, 'error', upstreamRes.status, bytes.toString('utf8').slice(0, ERROR_TRACE_CHARS))
+      res.writeHead(upstreamRes.status, headers)
+      res.end(bytes)
+      return
     }
-    if (rewrite !== undefined && upstreamRes.ok && contentType.includes('application/json')) {
-      const text = await upstreamRes.text()
+    if (rewrite !== undefined && upstreamRes.ok && contentType.startsWith('text/event-stream')) {
+      if (trace === undefined) return pipeStream(res, upstreamRes, headers, rewrite.wire.stream(rewrite.ctx), log)
+      let observed = false
+      const observe = (message: unknown): void => {
+        observed = true
+        recordReply(trace, 'response', upstreamRes.status, message)
+      }
+      await pipeStream(res, upstreamRes, headers, rewrite.wire.stream({ ...rewrite.ctx, observe }), log)
+      // The stream ended before a complete reply (aborted, client gone): still one line per request.
+      if (!observed) recordReply(trace, 'response', upstreamRes.status, undefined)
+      return
+    }
+    if (upstreamRes.ok && contentType.includes('application/json') && (rewrite !== undefined || trace !== undefined)) {
+      const bytes = Buffer.from(await upstreamRes.arrayBuffer())
+      let body: unknown
+      try {
+        body = JSON.parse(new TextDecoder().decode(bytes))
+      } catch (err) {
+        recordReply(trace, 'error', 502, errorMessage(err))
+        if (rewrite !== undefined) return sendError(res, 502, 'transform_failed', errorMessage(err))
+        res.writeHead(upstreamRes.status, headers)
+        res.end(bytes)
+        return
+      }
+      // Before `wire.response`: the sink is synchronous, so it sees the reply as the provider sent it.
+      recordReply(trace, 'response', upstreamRes.status, body)
+      if (rewrite === undefined) {
+        res.writeHead(upstreamRes.status, headers)
+        res.end(bytes)
+        return
+      }
       let restored: string
       try {
-        restored = JSON.stringify(rewrite.wire.response(JSON.parse(text), rewrite.ctx))
+        restored = JSON.stringify(rewrite.wire.response(body, rewrite.ctx))
       } catch (err) {
         return sendError(res, 502, 'transform_failed', errorMessage(err))
       }
@@ -272,8 +340,10 @@ export async function createTransformProxy(options: TransformProxyOptions): Prom
       res.end(restored)
       return
     }
+    const bytes = Buffer.from(await upstreamRes.arrayBuffer())
+    recordReply(trace, 'response', upstreamRes.status, undefined)
     res.writeHead(upstreamRes.status, headers)
-    res.end(Buffer.from(await upstreamRes.arrayBuffer()))
+    res.end(bytes)
   }
 
   const server = createServer((req, res) => {
