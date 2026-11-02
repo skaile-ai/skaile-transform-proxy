@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1
+
+- Anthropic walker: the system text that Anthropic's Claude subscription (OAuth) check reads verbatim passes untransformed: the leading Claude Code identity sentence and the leading `x-anthropic-billing-header:` line. The rest of each block is still transformed. forge-anon read `Claude` as a name and the `cc_version` as IP addresses, so every request of a subscription session with anon on got 429 `rate_limit_error` "Error".
+
 ## 0.3.0
 
 - omp extension, **behaviour change**: `/anon on` and `/anon off` switch only the omp process they run in (its subagents and its `/new`, `/resume`, `/fork` sessions included) and no longer save the default. Before, every `/anon on|off` wrote `~/.omp/agent/skaile-transform-proxy.json`, so turning anon off in one window turned it off for every omp started later. `/anon on --global` and `/anon off --global` also save the default. A saved `on` is applied at session start only until the first successful `/anon on|off` in that process, so a plain `/anon off` stays off across `/new`. An existing saved `enabled: true` still turns anon on in new omp processes; run `/anon off --global` to clear it.

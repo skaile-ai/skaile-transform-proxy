@@ -132,6 +132,8 @@ A module default-exports a `TransformModule`:
 
 The Anthropic walker appends the pipeline `instruction` after the host's system prompt: a string `system` gets it after a blank line, a block array gets it as one more text block at the end, and an absent `system` becomes the instruction. The host's leading blocks stay first, because Claude Code gateways (TeamClaude) refuse Sonnet requests with 429 `rate_limit_error` when the system prompt does not start with the Claude Code blocks. The OpenAI walkers still put the instruction first: a leading `system` message in chat completions, a prefix of `instructions` in responses.
 
+Those leading blocks also pass untransformed: a system text that starts with the Claude Code identity sentence (`You are Claude Code, Anthropic's official CLI for Claude.`) keeps that sentence, and one that starts with `x-anthropic-billing-header:` keeps that first line; the rest of the text is transformed. Anthropic's Claude subscription (OAuth) check reads them verbatim and answers 429 `rate_limit_error` with the message `Error` when they differ, and a German NER reads `Claude` as a name and a `cc_version` as an IP address. The host writes these blocks; they carry no user data.
+
 `inboundStream().push(c1) + … + flush()` must equal `inbound(c1 + … + cn)` for every chunking.
 
 Connectors publish facts through `proxy.session(id).publisher(source)`. Facts are in-process only.
