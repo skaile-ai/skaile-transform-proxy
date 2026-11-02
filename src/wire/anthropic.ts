@@ -29,8 +29,8 @@ async function outbound(transform: Transform, text: string, leaf: TextLeaf): Pro
 }
 
 /** A string, or an array of blocks whose `text` blocks are rewritten; anything else is refused. */
-async function rewriteText(content: unknown, slot: string, leaf: TextLeaf, transform: Transform): Promise<unknown> {
-  if (typeof content === 'string') return outbound(transform, content, leaf)
+async function rewriteText(content: unknown, slot: string, rewrite: (text: string) => Promise<string>): Promise<unknown> {
+  if (typeof content === 'string') return rewrite(content)
   if (!Array.isArray(content)) return malformed(slot)
   const out: unknown[] = []
   for (const block of content) {
@@ -41,9 +41,31 @@ async function rewriteText(content: unknown, slot: string, leaf: TextLeaf, trans
       continue
     }
     if (typeof block.text !== 'string') return malformed(`${slot} text block`)
-    out.push({ ...block, text: await outbound(transform, block.text, leaf) })
+    out.push({ ...block, text: await rewrite(block.text) })
   }
   return out
+}
+
+/**
+ * Host-written system text that Anthropic's Claude subscription (OAuth) check reads verbatim: the
+ * billing header line and the Claude Code identity sentence. Rewritten ("CLI for <NAME_…>",
+ * "cc_version=<CONTACT_IP_…>"), the request is answered 429 `rate_limit_error` "Error". Neither
+ * carries user data.
+ */
+const BILLING_HEADER = 'x-anthropic-billing-header:'
+const CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
+
+/** The leading part of a system text that passes untransformed; `''` when there is none. */
+function gatePrefix(text: string): string {
+  if (text.startsWith(CLAUDE_CODE_IDENTITY)) return CLAUDE_CODE_IDENTITY
+  if (!text.startsWith(BILLING_HEADER)) return ''
+  const end = text.indexOf('\n')
+  return end === -1 ? text : text.slice(0, end)
+}
+
+async function rewriteSystemText(text: string, transform: Transform): Promise<string> {
+  const kept = gatePrefix(text)
+  return kept + (await outbound(transform, text.slice(kept.length), { kind: 'system' }))
 }
 
 /** Every string leaf of a JSON value (tool-call input); keys stay as they are. */
@@ -112,7 +134,10 @@ async function rewriteContent(content: unknown, role: unknown, toolNames: Readon
           break
         }
         const toolName = typeof block.tool_use_id === 'string' ? toolNames.get(block.tool_use_id) : undefined
-        out.push({ ...block, content: await rewriteText(block.content, 'tool_result content', { kind: 'toolResult', toolName }, ctx.transform) })
+        out.push({
+          ...block,
+          content: await rewriteText(block.content, 'tool_result content', (text) => outbound(ctx.transform, text, { kind: 'toolResult', toolName })),
+        })
         break
       }
       default:
@@ -244,7 +269,7 @@ export const anthropicWalker: WireWalker = {
   async request(body: unknown, ctx: WireContext): Promise<unknown> {
     if (!isObj(body)) return malformed('request body')
     const out: Obj = { ...body }
-    if (body.system !== undefined) out.system = await rewriteText(body.system, 'system', { kind: 'system' }, ctx.transform)
+    if (body.system !== undefined) out.system = await rewriteText(body.system, 'system', (text) => rewriteSystemText(text, ctx.transform))
     if (ctx.transform.instruction !== undefined) out.system = withInstruction(out.system, ctx.transform.instruction)
     if (body.messages !== undefined) {
       if (!Array.isArray(body.messages)) return malformed('messages')

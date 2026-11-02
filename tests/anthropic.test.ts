@@ -175,6 +175,47 @@ describe('anthropic request', () => {
     ])
   })
 
+  test('the subscription billing header and Claude Code identity pass verbatim; the text after them is rewritten', async () => {
+    // Like forge-anon's NER and regex: "Claude" is a name, a version is an IP address.
+    const calls: { text: string; leaf: TextLeaf }[] = []
+    const greedy: Transform = {
+      ...fakeTransform(),
+      async outbound(text, leaf) {
+        calls.push({ text, leaf })
+        return text.replaceAll('Claude', 'NAME_1').replaceAll('2.1.280', 'IP_1').replaceAll('Lena', 'PSEUDO_A')
+      },
+    }
+    const identity = "You are Claude Code, Anthropic's official CLI for Claude."
+    const billing = 'x-anthropic-billing-header: cc_version=2.1.280.077; cc_entrypoint=cli; cch=00000;'
+    const body = {
+      system: [
+        { type: 'text', text: billing },
+        { type: 'text', text: identity },
+        { type: 'text', text: `${identity}Lena asks Claude`, cache_control: { type: 'ephemeral' } },
+        { type: 'text', text: `${billing}\nLena on 2.1.280` },
+        { type: 'text', text: `Lena: ${identity}` },
+      ],
+      messages: [],
+    }
+    const out = (await anthropicWalker.request(body, { ...context(), transform: greedy })) as { system: unknown[] }
+    expect(out.system).toEqual([
+      { type: 'text', text: billing },
+      { type: 'text', text: identity },
+      { type: 'text', text: `${identity}PSEUDO_A asks NAME_1`, cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: `${billing}\nPSEUDO_A on IP_1` },
+      { type: 'text', text: "PSEUDO_A: You are NAME_1 Code, Anthropic's official CLI for NAME_1." },
+      { type: 'text', text: 'INSTR' },
+    ])
+    expect(calls.map((call) => call.text)).toEqual(['Lena asks Claude', '\nLena on 2.1.280', `Lena: ${identity}`])
+  })
+
+  test('a string system prompt keeps its leading Claude Code identity', async () => {
+    const greedy: Transform = { ...fakeTransform(), outbound: async (text) => text.replaceAll('Claude', 'NAME_1') }
+    const body = { system: "You are Claude Code, Anthropic's official CLI for Claude. Ask Claude.", messages: [] }
+    const out = (await anthropicWalker.request(body, { ...context(), transform: greedy })) as { system: unknown }
+    expect(out.system).toBe("You are Claude Code, Anthropic's official CLI for Claude. Ask NAME_1.\n\nINSTR")
+  })
+
   test('a thinking block whose signature is cached is sent back with the cached model text, unrewritten', async () => {
     const calls: { text: string; leaf: TextLeaf }[] = []
     const ctx = context(calls)
