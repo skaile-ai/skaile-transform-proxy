@@ -32,6 +32,12 @@ export interface TransformProxy {
   session(id: string): { readonly facts: SessionFacts; publisher(source: string): SessionFactPublisher }
   /** Disposes the session's transform instances and forgets its facts and caches. */
   dropSession(id: string): Promise<void>
+  /**
+   * Host-only, in-process: each stage's `inspect()` result of the session's pipeline instance, keyed by transform id.
+   * `{}` when the session or pipeline is unknown, the instance is not built, or its build failed.
+   * Never builds an instance or creates session state; there is no HTTP route for it.
+   */
+  inspect(sessionId: string, pipelineId?: string): Promise<Record<string, unknown>>
   close(): Promise<void>
 }
 
@@ -77,6 +83,8 @@ export async function createTransformProxy(options: TransformProxyOptions): Prom
   const factories = await openTransforms(options.transforms, options.baseDir, log)
   const pipelines = options.pipelines
   const sessions = new Map<string, SessionState>()
+  /** Composed instance -> its stages with their transform ids, for `inspect`. */
+  const stagesOf = new WeakMap<Transform, readonly { id: string; transform: Transform }[]>()
 
   function stateFor(id: string): SessionState {
     const existing = sessions.get(id)
@@ -109,7 +117,9 @@ export async function createTransformProxy(options: TransformProxyOptions): Prom
       }
       throw err
     }
-    return composeTransforms(stages, log)
+    const composed = composeTransforms(stages, log)
+    stagesOf.set(composed, ids.map((id, i) => ({ id, transform: stages[i]! })))
+    return composed
   }
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -254,6 +264,24 @@ export async function createTransformProxy(options: TransformProxyOptions): Prom
       if (state === undefined) return
       sessions.delete(id)
       await disposeInstances(state, log)
+    },
+    async inspect(sessionId: string, pipelineId?: string) {
+      const state = sessions.get(sessionId)
+      const pipeline = pipelineId ?? options.defaultPipeline
+      if (state === undefined || pipeline === undefined) return {}
+      const pending = state.instances.get(pipeline)
+      if (pending === undefined) return {}
+      let instance: Transform
+      try {
+        instance = await pending
+      } catch {
+        return {}
+      }
+      const result: Record<string, unknown> = {}
+      for (const stage of stagesOf.get(instance) ?? []) {
+        if (typeof stage.transform.inspect === 'function') result[stage.id] = stage.transform.inspect()
+      }
+      return result
     },
     async close() {
       const closed = Promise.withResolvers<void>()

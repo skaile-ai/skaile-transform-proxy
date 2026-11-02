@@ -421,6 +421,28 @@ describe('sessions', () => {
     await post(proxy.url, '/v1/messages', headers, messages('Alice'))
     expect(probe.factories).toEqual(['s1', 's1'])
   })
+
+  test('inspect returns each stage state keyed by transform id', async () => {
+    const { proxy, probe } = await start({ scripted: { inspect: true } })
+    const res = await post(proxy.url, '/v1/messages', routed({ [SESSION_HEADER]: 's1' }), messages('Alice'))
+    expect(res.status).toBe(200)
+    expect(probe.outbound.length).toBeGreaterThan(0)
+    expect(await proxy.inspect('s1')).toEqual({ scripted: { seen: probe.outbound.length } })
+  })
+
+  test('inspect of an unknown session is empty and creates no session state', async () => {
+    const { proxy, probe } = await start({ scripted: { inspect: true } })
+    expect(await proxy.inspect('nope')).toEqual({})
+    expect(await proxy.inspect('nope', 'anon')).toEqual({})
+    expect(probe.factories).toEqual([])
+  })
+
+  test('inspect after dropSession is empty', async () => {
+    const { proxy } = await start({ scripted: { inspect: true } })
+    await post(proxy.url, '/v1/messages', routed({ [SESSION_HEADER]: 's1' }), messages('Alice'))
+    await proxy.dropSession('s1')
+    expect(await proxy.inspect('s1')).toEqual({})
+  })
 })
 
 describe('createTransformProxy startup', () => {

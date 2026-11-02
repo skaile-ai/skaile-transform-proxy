@@ -26,6 +26,8 @@ export interface Transform {
   inboundStream(): { push(chunk: string): string; flush(): string }
   /** Called once when the proxy drops the session. */
   dispose?(): void | Promise<void>
+  /** Host-only state of this instance (e.g. the anon mapping), read through TransformProxy.inspect. Never called by the walkers, never sent anywhere. */
+  inspect?(): unknown
 }
 
 export interface SessionFact {

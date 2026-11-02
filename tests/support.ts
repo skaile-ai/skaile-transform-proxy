@@ -80,6 +80,8 @@ export interface ReplacerOptions {
   readonly fail?: string
   readonly onOutbound?: (text: string, leaf: TextLeaf) => void
   readonly onDispose?: () => void
+  /** Becomes the transform's `inspect()`. */
+  readonly inspect?: () => unknown
 }
 
 /** A transform that replaces literal strings on the way out and on the way back. */
@@ -100,6 +102,7 @@ export function replacer(options: ReplacerOptions = {}): Transform {
     dispose() {
       options.onDispose?.()
     },
+    ...(options.inspect === undefined ? {} : { inspect: options.inspect }),
   }
 }
 
@@ -115,6 +118,8 @@ export interface ScriptedConfig {
   readonly failFactories?: number
   /** Each factory call waits this long before resolving. */
   readonly factoryDelayMs?: number
+  /** Instances answer `inspect()` with `{ seen }`, the number of their outbound calls. */
+  readonly inspect?: boolean
 }
 
 export interface OutboundCall {
@@ -144,6 +149,7 @@ export function scriptedModule(config: ScriptedConfig = {}): { module: Transform
     id: 'scripted',
     open: async () => async (ctx) => {
       probe.factories.push(ctx.sessionId)
+      let seen = 0
       if (config.factoryDelayMs !== undefined) await new Promise((resolve) => setTimeout(resolve, config.factoryDelayMs))
       if (failuresLeft > 0) {
         failuresLeft -= 1
@@ -155,11 +161,13 @@ export function scriptedModule(config: ScriptedConfig = {}): { module: Transform
         inbound: config.inbound ?? DEFAULT_INBOUND,
         fail: config.fail,
         onOutbound: (text, leaf) => {
+          seen += 1
           probe.outbound.push({ text, leaf, facts: ctx.facts.list().map((fact) => `${fact.kind}:${fact.value}`) })
         },
         onDispose: () => {
           probe.disposed.push(ctx.sessionId)
         },
+        inspect: config.inspect === true ? () => ({ seen }) : undefined,
       })
     },
   }

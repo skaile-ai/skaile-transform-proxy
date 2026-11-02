@@ -85,6 +85,8 @@ await proxy.dropSession('s1')
 await proxy.close()
 ```
 
+`await proxy.inspect('s1')` lets the host read what the session's transforms hold, e.g. forge-anon's mapping for highlights: `{ <transformId>: state }`, one entry per stage of the pipeline (`inspect('s1', 'anon')`; default `defaultPipeline`) whose `Transform` implements `inspect()`. It is in-process only: there is no HTTP route, and the result is never sent anywhere. An unknown session, a pipeline that has not been built for the session yet, or a failed build gives `{}`; `inspect` never builds an instance or creates session state.
+
 ## omp extension
 
 The package ships an [omp](https://omp.sh) extension (subpath `@skaile/transform-proxy/omp`, declared in the package manifest under `omp.extensions`):
@@ -128,7 +130,7 @@ A module default-exports a `TransformModule`:
 
 - `open(config, { baseDir, log })` runs once per proxy. It validates the config and builds shared state. Throwing rejects startup.
 - It returns a `TransformFactory`, which runs once per `(session, pipeline)`: `(ctx: { sessionId, facts, log }) => Transform`.
-- A `Transform` has `instruction?`, `outbound(text, leaf)`, `inbound(text)`, `inboundStream()` and `dispose?()`.
+- A `Transform` has `instruction?`, `outbound(text, leaf)`, `inbound(text)`, `inboundStream()`, `dispose?()` and `inspect?()` (host-only state, read through `proxy.inspect`; the walkers never call it).
 
 The Anthropic walker appends the pipeline `instruction` after the host's system prompt: a string `system` gets it after a blank line, a block array gets it as one more text block at the end, and an absent `system` becomes the instruction. The host's leading blocks stay first, because Claude Code gateways (TeamClaude) refuse Sonnet requests with 429 `rate_limit_error` when the system prompt does not start with the Claude Code blocks. The OpenAI walkers still put the instruction first: a leading `system` message in chat completions, a prefix of `instructions` in responses.
 

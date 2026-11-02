@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.0
+
+- Library: `TransformProxy.inspect(sessionId, pipelineId?)` returns host-only transform state, `{ <transformId>: state }` for each stage of the session's pipeline instance (default `defaultPipeline`) that implements the new optional `Transform.inspect?()`. A host such as anon-ai reads forge-anon's mapping through it to show what was anonymized. It is in-process only (no HTTP route, never sent), returns `{}` for an unknown session, an unbuilt pipeline or a failed build, and never builds an instance or creates session state.
+
 ## 0.3.1
 
 - Anthropic walker: the system text that Anthropic's Claude subscription (OAuth) check reads verbatim passes untransformed: the leading Claude Code identity sentence and the leading `x-anthropic-billing-header:` line. The rest of each block is still transformed. forge-anon read `Claude` as a name and the `cc_version` as IP addresses, so every request of a subscription session with anon on got 429 `rate_limit_error` "Error".

@@ -1,6 +1,6 @@
 {
   "name": "@skaile/transform-proxy",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "type": "module",
   "description": "Same-protocol passthrough proxy that runs model requests and replies through a chain of text transforms (Anthropic Messages, OpenAI chat, OpenAI responses)",
   "license": "MIT",
