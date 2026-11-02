@@ -169,7 +169,10 @@ describe('response trace', () => {
       headers: { 'content-type': 'text/event-stream' },
       body: sse([{ event: 'content_block_delta', data: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'P1' } } }]),
     }
-    expect((await send(proxy.url, '/v1/messages', ANTHROPIC)).status).toBe(200)
+    const res = await send(proxy.url, '/v1/messages', ANTHROPIC)
+    expect(res.status).toBe(200)
+    // The response line is written when the stream ends, which the client sees only after reading the body.
+    await res.text()
     const line = reply(events)
     expect(line.phase).toBe('response')
     expect(line.status).toBe(200)
