@@ -1,4 +1,4 @@
-// omp extension: `/anon on|off|status` routes every provider of the model registry through the transform proxy.
+// omp extension: `/anon on|off [--global] | status` routes every provider of the model registry through the transform proxy.
 import { homedir } from 'node:os'
 import { errorMessage } from '../log.ts'
 import { createAnonController, type AnonController, type ImageSending } from './anon.ts'

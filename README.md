@@ -93,7 +93,7 @@ The package ships an [omp](https://omp.sh) extension (subpath `@skaile/transform
 omp plugin install @skaile/transform-proxy
 ```
 
-It adds the command `/anon on|off|status` and a compact status: `🟢A` (on), `🔴A` (off) or `🟠A` (error). The colour is in the emoji because omp strips ANSI colour from extension statuses and draws them in its accent colour. Unless `SKAILE_TRANSFORM_PROXY_URL` names a running proxy, it needs Node ≥ 22 on `PATH` (or its path in `SKAILE_TRANSFORM_PROXY_NODE`).
+It adds the command `/anon on|off [--global] | status` and a compact status: `🟢A` (on), `🔴A` (off) or `🟠A` (error). The colour is in the emoji because omp strips ANSI colour from extension statuses and draws them in its accent colour. Unless `SKAILE_TRANSFORM_PROXY_URL` names a running proxy, it needs Node ≥ 22 on `PATH` (or its path in `SKAILE_TRANSFORM_PROXY_NODE`).
 
 omp shows extension statuses on an extra line below the status line. To show the status in the status line itself, add the `status` segment and turn the extra line off in `~/.omp/agent/config.yml` (`showHookStatus: false` moves every extension status, not just this one, into the segment):
 
@@ -116,7 +116,8 @@ statusLine:
 - The proxy session follows the root omp session: on `/new`, `/resume`, `/fork` (`session_switch`) and on a root `session_start` with a new session id, every provider is re-routed with the new `x-skaile-transform-session`. The proxy keeps the old session's state in memory until it exits; no request carries that id again. A `session_start` of a headless `print` session (how omp runs subagents) keeps the parent's id, so subagents share its pseudonyms.
 - `/anon off` restores the original base URLs and headers.
 - `/anon status` shows the state, the proxy URL and its source, the pipeline, the session id, whether images are blocked, and the routed and refused providers.
-- The enabled flag is saved in `skaile-transform-proxy.json` in omp's agent dir (`~/.omp/agent`; `SKAILE_TRANSFORM_PROXY_OMP_STATE` overrides the path) and re-applied when a session starts.
+- `/anon on` and `/anon off` switch only the omp process they run in: that window, its subagents, and the sessions it opens with `/new`, `/resume` and `/fork`. Other omp windows are not touched, and the saved default does not change.
+- `/anon on --global` and `/anon off --global` also save the default for omp processes started later, in `skaile-transform-proxy.json` in omp's agent dir (`~/.omp/agent`; `SKAILE_TRANSFORM_PROXY_OMP_STATE` overrides the path). A session start applies a saved `on` until the first successful `/anon on|off` in that process; from then on the process follows its own choice. A failed `/anon on --global` saves nothing.
 - `SKAILE_TRANSFORM_PROXY_MODE=required` (set by a skaile session in required mode) turns routing on at session start and refuses `/anon off`.
 
 The overrides are registered under the model-registry source `skaile-transform-proxy`, so `/anon off` clears them in one catalog reload. A provider that another extension registered at runtime is taken over while anon is on; `/anon off` restores its base URL and headers, and a provider that existed only at runtime is reported as lost (restart omp to restore it).

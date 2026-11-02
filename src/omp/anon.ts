@@ -17,7 +17,7 @@ export const TOKEN_ENV = 'SKAILE_TRANSFORM_PROXY_TOKEN'
 export const NODE_ENV = 'SKAILE_TRANSFORM_PROXY_NODE'
 /** `required` (set by a skaile session in required mode): routing is forced on and `/anon off` is refused. */
 export const MODE_ENV = 'SKAILE_TRANSFORM_PROXY_MODE'
-/** Overrides the path of the persisted enabled flag. */
+/** Overrides the path of the saved default (`/anon on|off --global`). */
 export const STATE_ENV = 'SKAILE_TRANSFORM_PROXY_OMP_STATE'
 /** The footer status key. */
 export const STATUS_KEY = 'anon'
@@ -30,12 +30,25 @@ export const SERVED_APIS: Readonly<Record<string, true>> = {
   'openai-responses': true,
 }
 
-const USAGE = 'usage: /anon on|off|status'
+/** `/anon on --global` / `/anon off --global` also save the default that new omp sessions start with. */
+const GLOBAL_FLAG = '--global'
+const USAGE = 'usage: /anon on|off [--global] | status'
 const VERBS: readonly OmpAutocompleteItem[] = [
-  { value: 'on', label: 'on', description: 'route every provider through the transform proxy' },
-  { value: 'off', label: 'off', description: 'restore the original provider base URLs' },
+  { value: 'on', label: 'on', description: 'route this session through the transform proxy' },
+  { value: 'on --global', label: 'on --global', description: 'on, and the default for new sessions' },
+  { value: 'off', label: 'off', description: 'restore this session\'s original provider base URLs' },
+  { value: 'off --global', label: 'off --global', description: 'off, and the default for new sessions' },
   { value: 'status', label: 'status', description: 'show the proxy, pipeline and routed providers' },
 ]
+
+/** A parsed `/anon` argument; `undefined` for anything else. */
+function parseCommand(args: string): { verb: 'on' | 'off' | 'status'; global: boolean } | undefined {
+  const [verb = '', ...flags] = args.trim().toLowerCase().split(/\s+/)
+  if (verb === '' || verb === 'status') return flags.length === 0 ? { verb: 'status', global: false } : undefined
+  if (verb !== 'on' && verb !== 'off') return undefined
+  if (flags.length === 0) return { verb, global: false }
+  return flags.length === 1 && flags[0] === GLOBAL_FLAG ? { verb, global: true } : undefined
+}
 
 /** How the extension spawns its proxy child. */
 export interface ProxySpawnOptions {
@@ -87,7 +100,8 @@ export interface AnonController {
   command(args: string, ctx: OmpContext, session: OmpSessionActions): Promise<void>
   completions(prefix: string): OmpAutocompleteItem[] | null
   /**
-   * Applies the persisted flag (or required mode) and refreshes the status bar. A root session
+   * Applies the saved default (unless `/anon on|off` already decided in this process) or required
+   * mode, and refreshes the status bar. A root session
    * whose omp session id changed rotates the proxy session; subagents keep the parent's id.
    */
   sessionStart(ctx: OmpContext, session: OmpSessionActions): Promise<void>
@@ -145,6 +159,8 @@ export function createAnonController(deps: AnonControllerDeps): AnonController {
   const registries = new WeakMap<OmpModelRegistry, RegistryState>()
   let wanted = required
   let enabled = false
+  /** The last successful `/anon on|off` in this omp process; once set, the saved default no longer applies here. */
+  let local: boolean | undefined
   /** Whether this controller holds the image block; only then does it release it. */
   let imagesBlocked = false
   /** The host answered that it cannot block images; asked once, warned once. */
@@ -397,7 +413,8 @@ export function createAnonController(deps: AnonControllerDeps): AnonController {
    */
   async function start(ctx: OmpContext, session: OmpSessionActions, root: boolean): Promise<void> {
     enterSession(ctx, root)
-    if (!wanted && readEnabled(statePath)) wanted = true
+    // The saved default applies until `/anon on|off` decides for this omp process.
+    if (!wanted && local === undefined && readEnabled(statePath)) wanted = true
     if (wanted) {
       const failure = await activate(ctx, session)
       if (failure !== undefined) {
@@ -414,19 +431,21 @@ export function createAnonController(deps: AnonControllerDeps): AnonController {
     statePath,
 
     async command(args, ctx, session) {
-      const verb = args.trim().toLowerCase()
-      switch (verb) {
+      const parsed = parseCommand(args)
+      const scope = parsed?.global === true ? `this session; default for new sessions: ${parsed.verb}` : 'this session'
+      switch (parsed?.verb) {
         case 'on': {
           const before = wanted
           wanted = true
           const failure = await activate(ctx, session)
           if (failure === undefined) {
-            persist(ctx, true)
+            local = true
+            if (parsed.global) persist(ctx, true)
             const count = stateOf(ctx.modelRegistry).routed.size
-            ctx.ui.notify(`anon on: ${count} provider(s) routed through ${endpoint?.url}`, 'info')
+            ctx.ui.notify(`anon on (${scope}): ${count} provider(s) routed through ${endpoint?.url}`, 'info')
             break
           }
-          // A failed `on` changes nothing: nothing is persisted, and an off state stays off.
+          // A failed `on` changes nothing: no default is saved, and an off state stays off.
           wanted = before || required
           ctx.ui.notify(`anon: ${failure}`, 'error')
           if (wanted) ctx.ui.notify(refusalHint(), 'error')
@@ -440,11 +459,12 @@ export function createAnonController(deps: AnonControllerDeps): AnonController {
           const lost = unroute(ctx)
           wanted = false
           enabled = false
+          local = false
           if (!(await rebind(ctx, session))) {
             ctx.ui.notify(`anon: could not rebind the active model ${ctx.model?.provider}/${ctx.model?.id}; select it again`, 'warning')
           }
-          persist(ctx, false)
-          ctx.ui.notify('anon off: original provider base URLs restored', 'info')
+          if (parsed.global) persist(ctx, false)
+          ctx.ui.notify(`anon off (${scope}): original provider base URLs restored`, 'info')
           if (lost.length > 0) {
             ctx.ui.notify(
               `anon: ${lost.join(', ')} lost their runtime registration (registered by another extension); restart omp to restore them`,
@@ -453,7 +473,6 @@ export function createAnonController(deps: AnonControllerDeps): AnonController {
           }
           break
         }
-        case '':
         case 'status':
           ctx.ui.notify(statusText(ctx), 'info')
           break

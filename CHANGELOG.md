@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.0
+
+- omp extension, **behaviour change**: `/anon on` and `/anon off` switch only the omp process they run in (its subagents and its `/new`, `/resume`, `/fork` sessions included) and no longer save the default. Before, every `/anon on|off` wrote `~/.omp/agent/skaile-transform-proxy.json`, so turning anon off in one window turned it off for every omp started later. `/anon on --global` and `/anon off --global` also save the default. A saved `on` is applied at session start only until the first successful `/anon on|off` in that process, so a plain `/anon off` stays off across `/new`. An existing saved `enabled: true` still turns anon on in new omp processes; run `/anon off --global` to clear it.
+
 ## 0.2.6
 
 - omp extension: while anon is on, in error or required, images are not sent. The extension sets omp's `images.blockImages` as a runtime override (never persisted), so omp replaces every image in the request, history included, with `Image reading is disabled.`; `/anon off` drops the override. Before, a screenshot from a browser tool made the proxy refuse every later request of the session with 400 `unsupported_content` ("Anthropic image content cannot be transformed"). `/anon status` lists `images: not sent`. An omp without the settings registry gets one warning, and the proxy keeps refusing images.

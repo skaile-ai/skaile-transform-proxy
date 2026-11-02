@@ -281,22 +281,25 @@ function writeConfig(dir: string, body = CONFIG): string {
 }
 
 describe('/anon command parsing', () => {
-  test('completes the three verbs by prefix', () => {
+  test('completes the verbs and their --global forms by prefix', () => {
     const anon = controller()
-    expect(anon.completions('')?.map((item) => item.value)).toEqual(['on', 'off', 'status'])
-    expect(anon.completions('o')?.map((item) => item.value)).toEqual(['on', 'off'])
+    expect(anon.completions('')?.map((item) => item.value)).toEqual(['on', 'on --global', 'off', 'off --global', 'status'])
+    expect(anon.completions('off')?.map((item) => item.value)).toEqual(['off', 'off --global'])
     expect(anon.completions(' ST')?.map((item) => item.value)).toEqual(['status'])
     expect(anon.completions('x')).toBeNull()
   })
 
-  test('an unknown verb notifies the usage and changes nothing', async () => {
-    const registry = standardRegistry()
-    const ctx = context(registry)
-    await controller().command('maybe', ctx)
-    expect(ctx.notes).toEqual([{ message: 'usage: /anon on|off|status', type: 'error' }])
-    expect(registry.calls).toEqual([])
-    expect(ctx.statuses).toEqual(['🔴A'])
-  })
+  for (const args of ['maybe', 'on --globl', 'on --global --global', 'status --global']) {
+    test(`"${args}" notifies the usage and changes nothing`, async () => {
+      const registry = standardRegistry()
+      const ctx = context(registry)
+      await controller().command(args, ctx)
+      expect(ctx.notes).toEqual([{ message: 'usage: /anon on|off [--global] | status', type: 'error' }])
+      expect(registry.calls).toEqual([])
+      expect(ctx.statuses).toEqual(['🔴A'])
+      expect(existsSync(statePath)).toBe(false)
+    })
+  }
 
   test('verbs are trimmed and case-insensitive; an empty argument shows the status', async () => {
     const ctx = context(standardRegistry())
@@ -329,8 +332,8 @@ describe('/anon on with SKAILE_TRANSFORM_PROXY_URL', () => {
     expect(registry.getProviderBaseUrl('vertex')).toBe('http://127.0.0.1:7001')
     expect(registry.getProviderHeaders('vertex')?.[UPSTREAM]).toBeUndefined()
     expect(ctx.statuses).toEqual(['🟢A'])
-    expect(lastNote(ctx)).toBe('anon on: 4 provider(s) routed through http://127.0.0.1:7001')
-    expect(persisted()).toEqual({ enabled: true })
+    expect(lastNote(ctx)).toBe('anon on (this session): 4 provider(s) routed through http://127.0.0.1:7001')
+    expect(existsSync(statePath)).toBe(false)
   })
 
   test('no token header when SKAILE_TRANSFORM_PROXY_TOKEN is unset', async () => {
@@ -523,7 +526,7 @@ describe('before_provider_request guard', () => {
 })
 
 describe('/anon off', () => {
-  test('clears the proxy source in one call, which drops the proxy headers, and persists the flag', async () => {
+  test('clears the proxy source in one call, which drops the proxy headers, and saves nothing', async () => {
     const registry = standardRegistry()
     const ctx = context(registry)
     const anon = controller()
@@ -534,8 +537,8 @@ describe('/anon off', () => {
     expect(registry.getProviderHeaders('anthropic')).toEqual({ 'x-team': 'a' })
     expect(registry.getProviderHeaders('openai')).toBeUndefined()
     expect(ctx.statuses).toEqual(['🟢A', '🔴A'])
-    expect(lastNote(ctx)).toBe('anon off: original provider base URLs restored')
-    expect(persisted()).toEqual({ enabled: false })
+    expect(lastNote(ctx)).toBe('anon off (this session): original provider base URLs restored')
+    expect(existsSync(statePath)).toBe(false)
   })
 
   test('re-registers the recorded original when another runtime override sat underneath', async () => {
@@ -563,6 +566,45 @@ describe('/anon off', () => {
     expect(registry.calls.some((call) => call.startsWith('clear'))).toBe(false)
     expect(registry.getProviderBaseUrl('openai')).toBe('http://127.0.0.1:7001')
     expect(ctx.statuses.at(-1)).toBe('🟢A')
+    expect(existsSync(statePath)).toBe(false)
+  })
+})
+
+describe('/anon --global', () => {
+  test('on --global saves the default; off --global saves off; plain verbs leave it alone', async () => {
+    const ctx = context(standardRegistry())
+    const anon = controller(ENV_PROXY)
+    await anon.command('on --global', ctx)
+    expect(lastNote(ctx)).toBe('anon on (this session; default for new sessions: on): 4 provider(s) routed through http://127.0.0.1:7001')
+    expect(persisted()).toEqual({ enabled: true })
+    await anon.command('off', ctx)
+    expect(persisted()).toEqual({ enabled: true })
+    await anon.command('OFF  --GLOBAL', ctx)
+    expect(lastNote(ctx)).toBe('anon off (this session; default for new sessions: off): original provider base URLs restored')
+    expect(persisted()).toEqual({ enabled: false })
+    expect(ctx.statuses).toEqual(['🟢A', '🔴A', '🔴A'])
+  })
+
+  test('a failed on --global saves nothing', async () => {
+    const ctx = context(standardRegistry(), { active: undefined })
+    const anon = controller({}, { spawnChild: () => { throw Object.assign(new Error('spawn node ENOENT'), { code: 'ENOENT' }) } })
+    await anon.command('on --global', ctx)
+    expect(ctx.statuses).toEqual(['🔴A'])
+    expect(existsSync(statePath)).toBe(false)
+  })
+
+  test('after a plain off, a later session start ignores a saved on default', async () => {
+    mkdirSync(dirname(statePath), { recursive: true })
+    writeFileSync(statePath, JSON.stringify({ enabled: true }))
+    const registry = standardRegistry()
+    const ctx = context(registry)
+    const anon = controller(ENV_PROXY)
+    await anon.sessionStart(ctx)
+    expect(ctx.statuses).toEqual(['🟢A'])
+    await anon.command('off', ctx)
+    await anon.sessionStart(ctx)
+    expect(registry.getProviderBaseUrl('anthropic')).toBe('https://api.anthropic.com')
+    expect(ctx.statuses).toEqual(['🟢A', '🔴A', '🔴A'])
     expect(persisted()).toEqual({ enabled: true })
   })
 })
@@ -1064,7 +1106,7 @@ describe('extension registration', () => {
     registerAnonExtension(pi, controller().inner)
     expect([...commands.keys()]).toEqual(['anon'])
     expect([...events.keys()]).toEqual(['session_start', 'session_switch', 'before_agent_start', 'turn_start', 'before_provider_request'])
-    expect(commands.get('anon')?.getArgumentCompletions?.('of')?.map((item) => item.value)).toEqual(['off'])
+    expect(commands.get('anon')?.getArgumentCompletions?.('of')?.map((item) => item.value)).toEqual(['off', 'off --global'])
 
     const registry = standardRegistry()
     const ctx = context(registry, { active: registry.find('openai', 'openai-0') })
