@@ -23,6 +23,7 @@ export {
   type ProxyConfig,
   type ResolvedProxyConfig,
 } from './config.ts'
+export { createFileTraceSink, DEFAULT_TRACE_MAX_CHARS, serializeTraceEvent, type FileTraceSinkOptions } from './trace.ts'
 export { anthropicWalker } from './wire/anthropic.ts'
 export { openaiChatWalker } from './wire/openai-chat.ts'
 export { openaiResponsesWalker } from './wire/openai-responses.ts'

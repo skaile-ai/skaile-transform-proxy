@@ -5,6 +5,8 @@ import type { WireWalker } from './wire/types.ts'
 
 /** A POST route: the path suffix it matches, the walker that rewrites the request, and whether the response is rewritten too. */
 export interface WireRoute {
+  /** Stable id used in trace events. */
+  readonly name: string
   readonly suffix: string
   readonly wire: WireWalker
   readonly rewriteResponse: boolean
@@ -15,10 +17,10 @@ export interface WireRoute {
  * Any other path, embeddings included, answers 404 `unsupported_route`.
  */
 export const WIRE_ROUTES: readonly WireRoute[] = [
-  { suffix: '/messages/count_tokens', wire: anthropicWalker, rewriteResponse: false },
-  { suffix: '/messages', wire: anthropicWalker, rewriteResponse: true },
-  { suffix: '/chat/completions', wire: openaiChatWalker, rewriteResponse: true },
-  { suffix: '/responses', wire: openaiResponsesWalker, rewriteResponse: true },
+  { name: 'anthropic.count_tokens', suffix: '/messages/count_tokens', wire: anthropicWalker, rewriteResponse: false },
+  { name: 'anthropic.messages', suffix: '/messages', wire: anthropicWalker, rewriteResponse: true },
+  { name: 'openai.chat', suffix: '/chat/completions', wire: openaiChatWalker, rewriteResponse: true },
+  { name: 'openai.responses', suffix: '/responses', wire: openaiResponsesWalker, rewriteResponse: true },
 ]
 
 export type Classified = { readonly kind: 'wire'; readonly route: WireRoute } | { readonly kind: 'passthrough' }

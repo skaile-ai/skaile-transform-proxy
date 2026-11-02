@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import type { Readable, Writable } from 'node:stream'
 import { fileURLToPath } from 'node:url'
 import { configCandidates, findProxyConfig, loadProxyConfig } from '../config.ts'
@@ -19,6 +19,8 @@ export const NODE_ENV = 'SKAILE_TRANSFORM_PROXY_NODE'
 export const MODE_ENV = 'SKAILE_TRANSFORM_PROXY_MODE'
 /** Overrides the path of the saved default (`/anon on|off --global`). */
 export const STATE_ENV = 'SKAILE_TRANSFORM_PROXY_OMP_STATE'
+/** The proxy's trace directory (relative to the cwd); the own proxy child inherits it with the rest of the environment. */
+export const TRACE_DIR_ENV = 'SKAILE_TRANSFORM_PROXY_TRACE_DIR'
 /** The footer status key. */
 export const STATUS_KEY = 'anon'
 /** The model-registry source the proxy overrides are registered under; `/anon off` clears it in one reload. */
@@ -125,6 +127,8 @@ interface Endpoint {
   readonly source: string
   /** Set for the extension's own proxy child; `exited` flips when it dies, so the next activation starts a new one. */
   readonly child?: { exited: boolean }
+  /** The own child's trace dir from its config `trace.dir`; the env var wins over it. */
+  readonly traceDir?: string
 }
 
 interface Original {
@@ -221,7 +225,14 @@ export function createAnonController(deps: AnonControllerDeps): AnonController {
       if (endpoint?.child === state) endpoint = undefined
     })
     const url = await waitForListening(child, { node, token, timeoutMs: listenTimeoutMs })
-    return { url, token, pipeline: options.defaultPipeline, source: `child process ${child.pid}, config ${path}`, child: state }
+    return {
+      url,
+      token,
+      pipeline: options.defaultPipeline,
+      source: `child process ${child.pid}, config ${path}`,
+      child: state,
+      ...(options.trace === undefined ? {} : { traceDir: options.trace.dir }),
+    }
   }
 
   function currentSessionId(ctx: OmpContext): string {
@@ -393,6 +404,7 @@ export function createAnonController(deps: AnonControllerDeps): AnonController {
       lines.push(`pipeline: ${endpoint.pipeline ?? 'the proxy default'}`)
     }
     if (sessionId !== undefined) lines.push(`session: ${sessionId}`)
+    lines.push(`trace: ${traceTarget(ctx.cwd)}`)
     if (imagesBlocked) lines.push('images: not sent (omp images.blockImages)')
     const routed = [...state.routed.keys()].sort()
     const refused = routed.flatMap((provider) => {
@@ -404,6 +416,13 @@ export function createAnonController(deps: AnonControllerDeps): AnonController {
     if (refused.length > 0) lines.push(`refused by the proxy (${refused.length}): ${refused.join(', ')}`)
     if (preRouted.length > 0) lines.push(`routed by their own config (${preRouted.length}): ${preRouted.sort().join(', ')}`)
     return lines.join('\n')
+  }
+
+  /** The proxy's trace directory, or `off`. With an external proxy only the env var is known here. */
+  function traceTarget(cwd: string): string {
+    const fromEnv = env[TRACE_DIR_ENV]
+    if (fromEnv !== undefined && fromEnv !== '') return resolve(cwd, fromEnv)
+    return endpoint?.traceDir ?? 'off'
   }
 
   /**

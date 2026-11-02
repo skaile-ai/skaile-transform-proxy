@@ -1,16 +1,21 @@
 #!/usr/bin/env node
 import { realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
+import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
 import { resolveProxyConfig } from './config.ts'
 import { errorMessage } from './log.ts'
 import { createTransformProxy, type TransformProxy } from './server.ts'
+import { createFileTraceSink } from './trace.ts'
 
 /** Environment variable that supplies the client token when `--token` is absent. */
 export const TOKEN_ENV = 'SKAILE_TRANSFORM_PROXY_TOKEN'
+/** Environment variable with the trace directory (relative to cwd); overrides `--trace-dir` and the config's `trace.dir`. */
+export const TRACE_DIR_ENV = 'SKAILE_TRANSFORM_PROXY_TRACE_DIR'
 
-const USAGE = 'usage: skaile-transform-proxy [--config <file>] [--port <n>] [--host <h>] [--token <t>] [--exit-with-stdin]'
+const USAGE =
+  'usage: skaile-transform-proxy [--config <file>] [--port <n>] [--host <h>] [--token <t>] [--trace-dir <dir>] [--exit-with-stdin]'
 
 export interface CliEnvironment {
   readonly cwd: string
@@ -30,7 +35,15 @@ export interface CliRun {
 
 /** Parses the arguments, loads the config and starts the proxy. Never installs signal handlers. */
 export async function runCli(argv: readonly string[], io: CliEnvironment): Promise<CliRun> {
-  let values: { config?: string; port?: string; host?: string; token?: string; 'exit-with-stdin'?: boolean; help?: boolean }
+  let values: {
+    config?: string
+    port?: string
+    host?: string
+    token?: string
+    'trace-dir'?: string
+    'exit-with-stdin'?: boolean
+    help?: boolean
+  }
   try {
     ;({ values } = parseArgs({
       args: [...argv],
@@ -40,6 +53,7 @@ export async function runCli(argv: readonly string[], io: CliEnvironment): Promi
         port: { type: 'string' },
         host: { type: 'string' },
         token: { type: 'string' },
+        'trace-dir': { type: 'string' },
         help: { type: 'boolean', short: 'h' },
         'exit-with-stdin': { type: 'boolean' },
       },
@@ -67,14 +81,26 @@ export async function runCli(argv: readonly string[], io: CliEnvironment): Promi
     return { code: 1 }
   }
 
+  // The config's `trace` is file-sink settings, not the proxy's `trace` sink option.
+  const { trace: traceConfig, ...proxyOptions } = config.options
+  const envTraceDir = io.env[TRACE_DIR_ENV]
+  const traceDir =
+    envTraceDir !== undefined && envTraceDir !== ''
+      ? resolve(io.cwd, envTraceDir)
+      : values['trace-dir'] !== undefined
+        ? resolve(io.cwd, values['trace-dir'])
+        : traceConfig?.dir
+
   try {
     const proxy = await createTransformProxy({
-      ...config.options,
+      ...proxyOptions,
       host: values.host,
       port,
       token: values.token ?? io.env[TOKEN_ENV],
       log: { debug: () => {}, info: () => {}, warn: (msg, ...args) => io.stderr(format('warn', msg, args)), error: (msg, ...args) => io.stderr(format('error', msg, args)) },
+      ...(traceDir === undefined ? {} : { trace: createFileTraceSink({ dir: traceDir, maxChars: traceConfig?.maxChars }) }),
     })
+    if (traceDir !== undefined) io.stderr(format('info', `trace: ${traceDir}`, []))
     io.stdout(`listening ${proxy.url}`)
     return { code: 0, proxy, exitWithStdin: values['exit-with-stdin'] === true }
   } catch (err) {
@@ -90,7 +116,7 @@ function parsePort(value: string | undefined): number | undefined {
 }
 
 function format(level: string, msg: string, args: readonly unknown[]): string {
-  return [`[transform-proxy ${level}] ${msg}`, ...args.map(String)].join(' ')
+  return [`[transform-proxy ${level}] ${msg}`, ...args.map((arg) => (typeof arg === 'string' ? arg : JSON.stringify(arg)))].join(' ')
 }
 
 /** True when this module is the executed entry point (the bin, or `bun src/cli.ts`). */

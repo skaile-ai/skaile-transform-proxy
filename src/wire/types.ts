@@ -10,6 +10,13 @@ export interface WireContext {
    * Walkers namespace their keys (`anthropic:<signature>`, `responses:<itemId>`).
    */
   readonly signatures: Map<string, string>
+  /**
+   * Called by a stream transformer once, on `flush`, with the model's complete reply as it came
+   * from the provider (placeholders, before restore), in the shape of the protocol's non-streamed
+   * response. A throw is the caller's problem: transformers must catch it so the stream is never
+   * disturbed. Absent = nobody records the reply; walkers skip the assembly work.
+   */
+  readonly observe?: (message: unknown) => void
 }
 
 /** Thrown by `request` for attachments (image, document, file parts); the server answers 400 `unsupported_content`. */

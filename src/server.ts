@@ -1,12 +1,13 @@
-import { timingSafeEqual } from 'node:crypto'
+import { randomUUID, timingSafeEqual } from 'node:crypto'
 import { createServer, type IncomingHttpHeaders, type IncomingMessage, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { composeTransforms } from './chain.ts'
-import type { Logger, SessionFactPublisher, SessionFacts, Transform } from './contract.ts'
+import type { Logger, SessionFactPublisher, SessionFacts, TraceEvent, TraceSink, Transform } from './contract.ts'
 import { errorMessage, silentLogger } from './log.ts'
 import { openTransforms, type TransformSpec } from './modules.ts'
 import { classify } from './routes.ts'
 import { createSessionState, disposeInstances, instanceFor, type SessionState } from './sessions.ts'
+import { requestDelta } from './trace.ts'
 import { UnsupportedContentError, type SseTransformer, type WireContext, type WireWalker } from './wire/types.ts'
 
 export interface TransformProxyOptions {
@@ -25,6 +26,8 @@ export interface TransformProxyOptions {
   /** Origins. Absent = any https origin plus loopback http. */
   allowUpstreams?: readonly string[]
   log?: Logger
+  /** Records what goes upstream after the pipeline and what comes back before restore. Absent = no trace. */
+  trace?: TraceSink
 }
 
 export interface TransformProxy {
@@ -94,6 +97,16 @@ export async function createTransformProxy(options: TransformProxyOptions): Prom
     return created
   }
 
+  /** A throwing sink is logged and otherwise ignored: the trace must never change what the client gets. */
+  function recordTrace(event: TraceEvent): void {
+    if (options.trace === undefined) return
+    try {
+      options.trace.record(event)
+    } catch (err) {
+      log.error(`transform proxy: trace sink failed: ${errorMessage(err)}`)
+    }
+  }
+
   async function buildInstance(state: SessionState, sessionId: string, pipelineId: string): Promise<Transform> {
     const stages: Transform[] = []
     const ids = pipelines[pipelineId] ?? []
@@ -150,7 +163,8 @@ export async function createTransformProxy(options: TransformProxyOptions): Prom
       return sendError(res, 404, 'unsupported_route', `${method} ${url.pathname} is not proxied`)
     }
 
-    const forwardTo = `${upstream.origin}${upstream.pathname.replace(/\/+$/, '')}${url.pathname}${url.search}`
+    const forwardPath = `${upstream.origin}${upstream.pathname.replace(/\/+$/, '')}${url.pathname}`
+    const forwardTo = `${forwardPath}${url.search}`
     const headers = forwardRequestHeaders(req.headers)
 
     if (classified.kind === 'passthrough') {
@@ -186,6 +200,31 @@ export async function createTransformProxy(options: TransformProxyOptions): Prom
     } catch (err) {
       if (err instanceof UnsupportedContentError) return sendError(res, 400, 'unsupported_content', err.message)
       return sendError(res, 502, 'transform_failed', errorMessage(err))
+    }
+
+    // Shared by this request's request/response/error trace lines; `startedAt` gives their durationMs.
+    const trace =
+      options.trace === undefined
+        ? undefined
+        : {
+            startedAt: Date.now(),
+            base: {
+              requestId: randomUUID(),
+              sessionId,
+              pipeline: pipelineId,
+              route: route.name,
+              upstream: forwardPath,
+              ...modelOf(rewritten),
+            },
+          }
+    if (trace !== undefined) {
+      recordTrace({
+        ...trace.base,
+        at: new Date(trace.startedAt).toISOString(),
+        phase: 'request',
+        content: requestDelta(rewritten, state.traced),
+        leaks: [],
+      })
     }
 
     const upstreamRes = await fetchUpstream(res, forwardTo, method, headers, JSON.stringify(rewritten))
@@ -306,6 +345,13 @@ function validatePipelines(options: TransformProxyOptions): void {
   if (options.defaultPipeline !== undefined && !Object.hasOwn(options.pipelines, options.defaultPipeline)) {
     throw new Error(`defaultPipeline "${options.defaultPipeline}" is not a configured pipeline`)
   }
+}
+
+/** `{ model }` when the request body names its model as a string, otherwise `{}`. */
+function modelOf(body: unknown): { model?: string } {
+  if (typeof body !== 'object' || body === null) return {}
+  const model = (body as { model?: unknown }).model
+  return typeof model === 'string' ? { model } : {}
 }
 
 function originOf(value: string): string {

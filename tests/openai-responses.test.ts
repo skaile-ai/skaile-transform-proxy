@@ -264,3 +264,30 @@ describe('openai responses stream (SSE)', () => {
     expect(run(context(), [raw])).toBe(raw)
   })
 })
+
+describe('openai responses stream observe', () => {
+  test('observe gets the raw completed response once; SSE output unchanged', () => {
+    const seen: unknown[] = []
+    const out = run({ ...context(), observe: (m) => seen.push(m) }, [STREAM.slice(0, 100), STREAM.slice(100)])
+    expect(out).toBe(run(context(), [STREAM]))
+    expect(deltas(out, 'response.output_text.delta')).toBe('Hi Lena! PSEUDO_')
+    expect(seen).toHaveLength(1)
+    const response = seen[0] as Obj
+    const output = response.output as Obj[]
+    expect((output[1]!.content as Obj[])[0]!.text).toBe('Hi PSEUDO_A! PSEUDO_')
+    expect(output[2]!.arguments).toBe(ARGS)
+  })
+
+  test('response.failed is observed; a throwing observer leaves the output unchanged', () => {
+    const failed = sse([{ type: 'response.failed', sequence_number: 0, response: { id: 'r', status: 'failed', error: { message: 'PSEUDO_A' } } }])
+    let calls = 0
+    const observe = (m: unknown) => {
+      calls++
+      expect((m as Obj).status).toBe('failed')
+      throw new Error('boom')
+    }
+    expect(run({ ...context(), observe }, [failed])).toBe(failed)
+    expect(run({ ...context(), observe: () => { calls++; throw new Error('boom') } }, [STREAM])).toBe(run(context(), [STREAM]))
+    expect(calls).toBe(2)
+  })
+})

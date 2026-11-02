@@ -182,10 +182,84 @@ function flushChoice(state: ChoiceState): Obj | undefined {
   return Object.keys(delta).length === 0 ? undefined : delta
 }
 
+interface AssembledChoice {
+  content: string | null
+  reasoning?: string
+  tools: Map<number, { id?: unknown; name: string; arguments: string }>
+  finish: unknown
+}
+
+/** Rebuilds the non-streamed `chat.completion` from raw (pre-restore) chunks for `ctx.observe`. */
+function createChatAssembler(): { add(chunk: Obj): void; take(): Obj | undefined } {
+  let seen = false
+  let envelope: Obj = {}
+  let usage: unknown
+  const choices = new Map<number, AssembledChoice>()
+  return {
+    add(chunk) {
+      seen = true
+      envelope = chunk
+      if (chunk.usage !== undefined && chunk.usage !== null) usage = chunk.usage
+      for (const choice of chunk.choices as unknown[]) {
+        if (!isObj(choice)) continue
+        const index = typeof choice.index === 'number' ? choice.index : 0
+        let state = choices.get(index)
+        if (state === undefined) {
+          state = { content: null, tools: new Map(), finish: null }
+          choices.set(index, state)
+        }
+        if (choice.finish_reason !== null && choice.finish_reason !== undefined) state.finish = choice.finish_reason
+        const delta = choice.delta
+        if (!isObj(delta)) continue
+        if (typeof delta.content === 'string') state.content = (state.content ?? '') + delta.content
+        if (typeof delta.reasoning_content === 'string') state.reasoning = (state.reasoning ?? '') + delta.reasoning_content
+        if (!Array.isArray(delta.tool_calls)) continue
+        for (const call of delta.tool_calls) {
+          if (!isObj(call)) continue
+          const callIndex = typeof call.index === 'number' ? call.index : 0
+          let tool = state.tools.get(callIndex)
+          if (tool === undefined) {
+            tool = { name: '', arguments: '' }
+            state.tools.set(callIndex, tool)
+          }
+          if (call.id !== undefined && call.id !== null) tool.id = call.id
+          const fn = call.function
+          if (isObj(fn)) {
+            if (typeof fn.name === 'string') tool.name += fn.name
+            if (typeof fn.arguments === 'string') tool.arguments += fn.arguments
+          }
+        }
+      }
+    },
+    take() {
+      if (!seen) return undefined
+      seen = false
+      const out: Obj = {
+        id: envelope.id,
+        object: 'chat.completion',
+        model: envelope.model,
+        choices: [...choices].sort(([a], [b]) => a - b).map(([index, state]) => {
+          const message: Obj = { role: 'assistant', content: state.content }
+          if (state.reasoning !== undefined) message.reasoning_content = state.reasoning
+          if (state.tools.size > 0) {
+            message.tool_calls = [...state.tools]
+              .sort(([a], [b]) => a - b)
+              .map(([, t]) => ({ id: t.id, type: 'function', function: { name: t.name, arguments: t.arguments } }))
+          }
+          return { index, message, finish_reason: state.finish }
+        }),
+      }
+      if (usage !== undefined) out.usage = usage
+      return out
+    },
+  }
+}
+
 function createStreamTransformer(ctx: WireContext): SseTransformer {
   const choices = new Map<number, ChoiceState>()
   /** The latest chunk's envelope (id, model, ...), reused for tail chunks. */
   let envelope: Obj = { object: 'chat.completion.chunk' }
+  const assembler = ctx.observe === undefined ? undefined : createChatAssembler()
 
   const choiceState = (index: number): ChoiceState => {
     let state = choices.get(index)
@@ -253,6 +327,7 @@ function createStreamTransformer(ctx: WireContext): SseTransformer {
       return block.raw
     }
     if (!isObj(payload) || !Array.isArray(payload.choices)) return block.raw
+    assembler?.add(payload)
     const { choices: _choices, ...rest } = payload
     envelope = rest
 
@@ -280,7 +355,23 @@ function createStreamTransformer(ctx: WireContext): SseTransformer {
     return before + (changed ? formatSseEvent(block.event, { ...payload, choices: rewritten }) : block.raw)
   }
 
-  return createSseFramer(handle, () => flushAll(undefined))
+  const framer = createSseFramer(handle, () => flushAll(undefined))
+  if (assembler === undefined) return framer
+  const observe = ctx.observe as (message: unknown) => void
+  return {
+    push: (chunk) => framer.push(chunk),
+    flush() {
+      const out = framer.flush()
+      const message = assembler.take()
+      if (message !== undefined) {
+        // An observer failure must never touch the stream.
+        try {
+          observe(message)
+        } catch {}
+      }
+      return out
+    },
+  }
 }
 
 export const openaiChatWalker: WireWalker = {

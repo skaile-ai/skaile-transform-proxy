@@ -203,6 +203,8 @@ interface StreamState {
 
 function createStreamTransformer(ctx: WireContext): SseTransformer {
   const streams = new Map<string, StreamState>()
+  /** Raw (pre-restore) terminal `response` object, kept only for `ctx.observe`. */
+  let final: Obj | undefined
 
   const open = (key: string, factory: () => TextRestorer): StreamState => {
     let state = streams.get(key)
@@ -273,7 +275,12 @@ function createStreamTransformer(ctx: WireContext): SseTransformer {
         return isObj(payload.item) ? formatSseEvent(block.event, { ...payload, item: restoreItem(payload.item, ctx) }) : block.raw
       case 'response.completed':
       case 'response.incomplete':
-        return isObj(payload.response) ? formatSseEvent(block.event, { ...payload, response: restoreResponse(payload.response, ctx) }) : block.raw
+        if (!isObj(payload.response)) return block.raw
+        if (ctx.observe !== undefined) final = payload.response
+        return formatSseEvent(block.event, { ...payload, response: restoreResponse(payload.response, ctx) })
+      case 'response.failed':
+        if (ctx.observe !== undefined && isObj(payload.response)) final = payload.response
+        return block.raw
       default:
         return block.raw
     }
@@ -294,7 +301,24 @@ function createStreamTransformer(ctx: WireContext): SseTransformer {
     return out
   }
 
-  return createSseFramer(handle, finish)
+  const framer = createSseFramer(handle, finish)
+  const observe = ctx.observe
+  if (observe === undefined) return framer
+  return {
+    push: (chunk) => framer.push(chunk),
+    flush() {
+      const out = framer.flush()
+      const response = final
+      final = undefined
+      if (response !== undefined) {
+        // An observer failure must never touch the stream.
+        try {
+          observe(response)
+        } catch {}
+      }
+      return out
+    },
+  }
 }
 
 export const openaiResponsesWalker: WireWalker = {

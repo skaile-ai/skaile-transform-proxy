@@ -615,7 +615,7 @@ describe('/anon status', () => {
     const ctx = context(registry)
     const anon = controller()
     await anon.command('status', ctx)
-    expect(lastNote(ctx)).toBe('anon off\nrouted (0): none')
+    expect(lastNote(ctx)).toBe('anon off\ntrace: off\nrouted (0): none')
     await anon.command('on', ctx)
     await anon.command('status', ctx)
     expect(lastNote(ctx)).toBe(
@@ -624,10 +624,35 @@ describe('/anon status', () => {
         'proxy: http://127.0.0.1:7001 (SKAILE_TRANSFORM_PROXY_URL)',
         'pipeline: the proxy default',
         'session: omp-session-1',
+        'trace: off',
         'routed (4): anthropic, bedrock, openai, vertex',
         'refused by the proxy (2): bedrock (bedrock-converse-stream), vertex (no base URL)',
       ].join('\n'),
     )
+  })
+
+  test('trace: the env dir, resolved against the cwd, also with an external proxy', async () => {
+    const ctx = context(standardRegistry())
+    const anon = controller({ ...ENV_PROXY, SKAILE_TRANSFORM_PROXY_TRACE_DIR: 'traces' })
+    await anon.command('status', ctx)
+    expect(lastNote(ctx)).toContain(`\ntrace: ${join(root, 'traces')}\n`)
+  })
+
+  test("trace: the own child's config trace.dir; the env dir wins over it", async () => {
+    writeConfig(root, `${CONFIG}trace:\n  dir: from-config\n`)
+    const ctx = context(standardRegistry())
+    const anon = controller({}, { spawnChild: fakeSpawner().spawnChild, cliPath: CLI })
+    await anon.command('on', ctx)
+    await anon.command('status', ctx)
+    expect(lastNote(ctx)).toContain(`\ntrace: ${join(root, '.skaile', 'from-config')}\n`)
+
+    const ctx2 = context(standardRegistry())
+    const spawner = fakeSpawner()
+    const withEnv = controller({ SKAILE_TRANSFORM_PROXY_TRACE_DIR: '/tmp/env-traces' }, { spawnChild: spawner.spawnChild, cliPath: CLI })
+    await withEnv.command('on', ctx2)
+    await withEnv.command('status', ctx2)
+    expect(lastNote(ctx2)).toContain('\ntrace: /tmp/env-traces\n')
+    expect(spawner.calls[0]!.options.env.SKAILE_TRANSFORM_PROXY_TRACE_DIR).toBe('/tmp/env-traces')
   })
 })
 

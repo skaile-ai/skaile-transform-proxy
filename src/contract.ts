@@ -59,3 +59,51 @@ export interface TransformModule {
   /** Once per proxy and config: validate config, build shared heavy state (detectors). Throws on a bad config. */
   open(config: unknown, ctx: { readonly baseDir: string; readonly log: Logger }): Promise<TransformFactory>
 }
+
+/** One leak-check finding. Never carries the value itself. */
+export interface TraceLeak {
+  /** Fact/original kind, e.g. 'person'. */
+  readonly kind: string
+  /** Fact source (publisher id), or 'pipeline' for `Transform.knownOriginals`. */
+  readonly source: string
+  /** JSON path in the rewritten request body, e.g. 'tools[0].description'. */
+  readonly at: string
+}
+
+/** One line of the anon trace: what left for the provider (request) or what it answered before restore (response/error). */
+export interface TraceEvent {
+  /** ISO timestamp. */
+  readonly at: string
+  /** Per proxied request; links its request/response/error lines. */
+  readonly requestId: string
+  readonly sessionId: string
+  readonly pipeline: string
+  /** `WireRoute.name`, e.g. 'anthropic.messages'. */
+  readonly route: string
+  /** Forward target origin + path, no query string. */
+  readonly upstream: string
+  /** Request body `model` when a string. */
+  readonly model?: string
+  readonly phase: 'request' | 'response' | 'error'
+  /** response/error: HTTP status (502 when the upstream was unreachable). */
+  readonly status?: number
+  /** response/error: ms since the request event. */
+  readonly durationMs?: number
+  /**
+   * request: the delta, keyed by JSON path (`{ 'messages[4]': {...}, system: [...] }`), only entries not yet traced in
+   * this session; `{}` when nothing is new.
+   * response: the model reply before restore (streamed: assembled in the protocol's non-streamed shape; `undefined` when
+   * the stream ended before a complete reply).
+   * error: the upstream error body as text, cut to 4096 chars, or the fetch error message.
+   */
+  readonly content?: unknown
+  /** Set only by `serializeTraceEvent`. */
+  readonly truncated?: boolean
+  /** request: leak-check findings; response/error: []. */
+  readonly leaks: readonly TraceLeak[]
+}
+
+/** Synchronous. The proxy catches a throw, logs it, and never lets it reach the client. */
+export interface TraceSink {
+  record(event: TraceEvent): void
+}

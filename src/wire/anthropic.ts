@@ -196,8 +196,82 @@ function tailDelta(kind: BlockState['kind'], tail: string): Obj {
   return { type: 'input_json_delta', partial_json: tail }
 }
 
+/**
+ * Rebuilds the Anthropic message from the raw upstream events (before restore) for `ctx.observe`.
+ * Errors are swallowed: recording the reply must never disturb the stream.
+ */
+function createStreamObserver(observe: (message: unknown) => void): { event(payload: Obj): void; finish(): void } {
+  let message: Obj | undefined
+  const content: Obj[] = []
+  const toolJson = new Map<number, string>()
+
+  const settleTool = (index: number): void => {
+    const json = toolJson.get(index)
+    const block = content[index]
+    if (json === undefined || block === undefined) return
+    toolJson.delete(index)
+    if (json === '') return
+    try {
+      block.input = JSON.parse(json)
+    } catch {
+      block.input = json
+    }
+  }
+
+  return {
+    event(payload) {
+      try {
+        const index = typeof payload.index === 'number' ? payload.index : undefined
+        switch (payload.type) {
+          case 'message_start':
+            if (isObj(payload.message)) message = { ...payload.message }
+            return
+          case 'content_block_start':
+            if (index === undefined || !isObj(payload.content_block)) return
+            content[index] = { ...payload.content_block }
+            if (payload.content_block.type === 'tool_use') toolJson.set(index, '')
+            return
+          case 'content_block_delta': {
+            const block = index === undefined ? undefined : content[index]
+            const delta = payload.delta
+            if (block === undefined || index === undefined || !isObj(delta)) return
+            if (delta.type === 'text_delta' && typeof delta.text === 'string') block.text = String(block.text ?? '') + delta.text
+            else if (delta.type === 'thinking_delta' && typeof delta.thinking === 'string') block.thinking = String(block.thinking ?? '') + delta.thinking
+            else if (delta.type === 'signature_delta' && typeof delta.signature === 'string') block.signature = String(block.signature ?? '') + delta.signature
+            else if (delta.type === 'input_json_delta' && typeof delta.partial_json === 'string') toolJson.set(index, (toolJson.get(index) ?? '') + delta.partial_json)
+            return
+          }
+          case 'content_block_stop':
+            if (index !== undefined) settleTool(index)
+            return
+          case 'message_delta':
+            if (message === undefined) return
+            if (isObj(payload.delta)) {
+              if ('stop_reason' in payload.delta) message.stop_reason = payload.delta.stop_reason
+              if ('stop_sequence' in payload.delta) message.stop_sequence = payload.delta.stop_sequence
+            }
+            if (isObj(payload.usage)) message.usage = { ...(isObj(message.usage) ? message.usage : {}), ...payload.usage }
+            return
+        }
+      } catch {
+        // Observation is best effort.
+      }
+    },
+    finish() {
+      try {
+        for (const index of [...toolJson.keys()]) settleTool(index)
+        if (message !== undefined) observe({ ...message, content: content.filter((block) => block !== undefined) })
+      } catch {
+        // A failing observer must not disturb the stream.
+      }
+      message = undefined
+    },
+  }
+}
+
 function createStreamTransformer(ctx: WireContext): SseTransformer {
   const blocks = new Map<number, BlockState>()
+  const observer = ctx.observe === undefined ? undefined : createStreamObserver(ctx.observe)
 
   const handle = (block: SseBlock): string => {
     let payload: unknown
@@ -207,6 +281,7 @@ function createStreamTransformer(ctx: WireContext): SseTransformer {
       return block.raw
     }
     if (!isObj(payload)) return block.raw
+    observer?.event(payload)
     const index = typeof payload.index === 'number' ? payload.index : undefined
 
     switch (payload.type) {
@@ -253,6 +328,7 @@ function createStreamTransformer(ctx: WireContext): SseTransformer {
   }
 
   const finish = (): string => {
+    observer?.finish()
     let out = ''
     for (const [index, state] of blocks) {
       const tail = state.restore.flush()

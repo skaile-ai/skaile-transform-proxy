@@ -9,10 +9,12 @@ export interface SessionState {
   readonly signatures: Map<string, string>
   /** Pipeline id -> the composed instance (or its pending build). */
   readonly instances: Map<string, Promise<Transform>>
+  /** sha256 of every request entry already written to the trace, so each request records only its delta. */
+  readonly traced: Set<string>
 }
 
 export function createSessionState(): SessionState {
-  return { facts: createSessionFacts(), signatures: new Map(), instances: new Map() }
+  return { facts: createSessionFacts(), signatures: new Map(), instances: new Map(), traced: new Set() }
 }
 
 /**

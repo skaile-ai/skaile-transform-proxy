@@ -383,3 +383,86 @@ describe('anthropic stream (SSE)', () => {
     expect(streamedText(run(context(), [stream]))).toBe('end PSEU')
   })
 })
+
+const FULL_STREAM = sse([
+  ['message_start', { type: 'message_start', message: { id: 'm9', type: 'message', role: 'assistant', model: 'claude-x', content: [], usage: { input_tokens: 10, output_tokens: 1 } } }],
+  ['content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } }],
+  ['content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'about PSEU' } }],
+  ['content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'DO_A' } }],
+  ['content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'SIG1' } }],
+  ['content_block_stop', { type: 'content_block_stop', index: 0 }],
+  ['content_block_start', { type: 'content_block_start', index: 1, content_block: { type: 'text', text: '' } }],
+  ['content_block_delta', { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: 'Hallo PSEU' } }],
+  ['content_block_delta', { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: 'DO_A!' } }],
+  ['content_block_stop', { type: 'content_block_stop', index: 1 }],
+  ['content_block_start', { type: 'content_block_start', index: 2, content_block: { type: 'tool_use', id: 't1', name: 'lookup', input: {} } }],
+  ['content_block_delta', { type: 'content_block_delta', index: 2, delta: { type: 'input_json_delta', partial_json: '{"q":"PSEU' } }],
+  ['content_block_delta', { type: 'content_block_delta', index: 2, delta: { type: 'input_json_delta', partial_json: 'DO_B"}' } }],
+  ['content_block_stop', { type: 'content_block_stop', index: 2 }],
+  ['message_delta', { type: 'message_delta', delta: { stop_reason: 'tool_use', stop_sequence: null }, usage: { output_tokens: 42 } }],
+  ['message_stop', { type: 'message_stop' }],
+])
+
+/** Splits `text` into chunks of varying sizes so boundaries fall inside events, keys and placeholders. */
+function ragged(text: string): string[] {
+  const out: string[] = []
+  for (let i = 0, n = 1; i < text.length; i += n, n = (n % 13) + 1) out.push(text.slice(i, i + n))
+  return out
+}
+
+describe('anthropic stream observe', () => {
+  test('observe receives the assembled reply before restore while the stream carries restored text', () => {
+    const seen: unknown[] = []
+    const ctx: WireContext = { ...context(), observe: (m) => seen.push(m) }
+    const out = run(ctx, ragged(FULL_STREAM))
+    expect(streamedText(out)).toBe('Hallo Lena!')
+    expect(seen).toEqual([
+      {
+        id: 'm9',
+        type: 'message',
+        role: 'assistant',
+        model: 'claude-x',
+        usage: { input_tokens: 10, output_tokens: 42 },
+        stop_reason: 'tool_use',
+        stop_sequence: null,
+        content: [
+          { type: 'thinking', thinking: 'about PSEUDO_A', signature: 'SIG1' },
+          { type: 'text', text: 'Hallo PSEUDO_A!' },
+          { type: 'tool_use', id: 't1', name: 'lookup', input: { q: 'PSEUDO_B' } },
+        ],
+      },
+    ])
+  })
+
+  test('output is identical with and without observe', () => {
+    const plain = run(context(), ragged(FULL_STREAM))
+    expect(run({ ...context(), observe: () => {} }, ragged(FULL_STREAM))).toBe(plain)
+    expect(run({ ...context(), observe: () => {} }, [FULL_STREAM])).toBe(plain)
+  })
+
+  test('a throwing observe does not change the output', () => {
+    const plain = run(context(), [FULL_STREAM])
+    const ctx: WireContext = { ...context(), observe: () => { throw new Error('boom') } }
+    expect(run(ctx, ragged(FULL_STREAM))).toBe(plain)
+  })
+
+  test('observe is called exactly once, and not without a message_start', () => {
+    let calls = 0
+    run({ ...context(), observe: () => { calls++ } }, ragged(FULL_STREAM))
+    expect(calls).toBe(1)
+    let none = 0
+    run({ ...context(), observe: () => { none++ } }, [FULL_STREAM.slice(FULL_STREAM.indexOf('event: content_block_start'))])
+    expect(none).toBe(0)
+  })
+
+  test('tool arguments that do not parse are kept as the raw string', () => {
+    const seen: unknown[] = []
+    const stream = sse([
+      ['message_start', { type: 'message_start', message: { id: 'm', content: [] } }],
+      ['content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 't', name: 'x', input: {} } }],
+      ['content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"q":' } }],
+    ])
+    run({ ...context(), observe: (m) => seen.push(m) }, [stream])
+    expect(seen).toMatchObject([{ content: [{ type: 'tool_use', input: '{"q":' }] }])
+  })
+})

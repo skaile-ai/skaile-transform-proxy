@@ -242,3 +242,48 @@ describe('openaiChatWalker.stream', () => {
     expect(out.endsWith('data: [DONE]\n\n')).toBe(true)
   })
 })
+
+describe('openai chat stream observe', () => {
+  const ARGS = JSON.stringify({ who: 'PSEUDO_A' })
+  const STREAM = sse([
+    chunk({ role: 'assistant', content: 'Hi PSEU' }),
+    chunk({ content: 'DO_A', reasoning_content: 'think PSEUDO_A' }),
+    chunk({ tool_calls: [{ index: 0, id: 'call_1', type: 'function', function: { name: 'lookup', arguments: ARGS.slice(0, 7) } }] }),
+    chunk({ tool_calls: [{ index: 0, function: { arguments: ARGS.slice(7) } }] }, 'tool_calls'),
+    { ...env, choices: [], usage: { prompt_tokens: 3, completion_tokens: 4 } },
+  ])
+
+  test('observe gets the pre-restore reply once; SSE output stays restored and unchanged', () => {
+    const seen: unknown[] = []
+    const out = run({ ...context(), observe: (m) => seen.push(m) }, [STREAM.slice(0, 40), STREAM.slice(40)])
+    expect(out).toBe(run(context(), [STREAM]))
+    expect(collect(out, (d) => d.content)).toBe('Hi Alice')
+    expect(seen).toEqual([
+      {
+        id: 'c1',
+        object: 'chat.completion',
+        model: 'm',
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: 'assistant',
+              content: 'Hi PSEUDO_A',
+              reasoning_content: 'think PSEUDO_A',
+              tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'lookup', arguments: ARGS } }],
+            },
+            finish_reason: 'tool_calls',
+          },
+        ],
+        usage: { prompt_tokens: 3, completion_tokens: 4 },
+      },
+    ])
+  })
+
+  test('a throwing observer leaves the output unchanged and is called once', () => {
+    let calls = 0
+    const out = run({ ...context(), observe: () => { calls++; throw new Error('boom') } }, [STREAM])
+    expect(out).toBe(run(context(), [STREAM]))
+    expect(calls).toBe(1)
+  })
+})

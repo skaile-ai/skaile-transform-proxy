@@ -12,6 +12,8 @@ export interface ProxyConfig {
   readonly pipelines: Record<string, readonly string[]>
   readonly defaultPipeline?: string
   readonly allowUpstreams?: readonly string[]
+  /** Trace file sink; `dir` is absolute (resolved against `baseDir`). */
+  readonly trace?: { readonly dir: string; readonly maxChars?: number }
 }
 
 export interface ResolvedProxyConfig {
@@ -54,7 +56,14 @@ export function resolveProxyConfig(lookup: ConfigLookup): ResolvedProxyConfig {
   return { path, options: loadProxyConfig(path) }
 }
 
-const TOP_LEVEL_KEYS: Record<string, true> = { transforms: true, pipelines: true, defaultPipeline: true, allowUpstreams: true }
+const TOP_LEVEL_KEYS: Record<string, true> = {
+  transforms: true,
+  pipelines: true,
+  defaultPipeline: true,
+  allowUpstreams: true,
+  trace: true,
+}
+const TRACE_KEYS: Record<string, true> = { dir: true, maxChars: true }
 
 /** Reads and validates a YAML config file. Unknown keys are rejected so that typos fail loudly. */
 export function loadProxyConfig(path: string): ProxyConfig {
@@ -80,6 +89,7 @@ export function parseProxyConfig(source: unknown, baseDir: string): ProxyConfig 
     pipelines: parsePipelines(source.pipelines),
     ...(source.defaultPipeline === undefined ? {} : { defaultPipeline: requireString(source.defaultPipeline, 'defaultPipeline') }),
     ...(source.allowUpstreams === undefined ? {} : { allowUpstreams: requireStringList(source.allowUpstreams, 'allowUpstreams') }),
+    ...(source.trace === undefined ? {} : { trace: parseTrace(source.trace, baseDir) }),
   }
 }
 
@@ -103,6 +113,19 @@ function parsePipelines(value: unknown): Record<string, readonly string[]> {
     out[id] = requireStringList(stages, `pipelines.${id}`)
   }
   return out
+}
+
+function parseTrace(value: unknown, baseDir: string): { dir: string; maxChars?: number } {
+  if (!isRecord(value)) throw new Error('trace must be a mapping with a dir')
+  for (const key of Object.keys(value)) {
+    if (!Object.hasOwn(TRACE_KEYS, key)) throw new Error(`unknown key "trace.${key}"`)
+  }
+  const dir = resolve(baseDir, requireString(value.dir, 'trace.dir'))
+  if (value.maxChars === undefined) return { dir }
+  if (typeof value.maxChars !== 'number' || !Number.isInteger(value.maxChars) || value.maxChars <= 0) {
+    throw new Error('trace.maxChars must be a positive integer')
+  }
+  return { dir, maxChars: value.maxChars }
 }
 
 function requireString(value: unknown, field: string): string {
