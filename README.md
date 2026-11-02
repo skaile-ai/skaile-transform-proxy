@@ -214,3 +214,4 @@ Connectors publish facts through `proxy.session(id).publisher(source)`. Facts ar
 - Fields the walkers do not rewrite (`tools`, metadata, unknown fields) are forwarded as they are. The [leak check](#leak-check) warns when one of them carries a known original; it does not block the request.
 - Leak warnings carry kind, source and JSON path, never the value. Trace files and any other `TraceSink` get the clear text that leaked: keep them local, never commit them, delete them once reviewed.
 - Mappings, facts, the signature cache and the trace hashes are kept in memory and are lost on restart.
+- omp writes the request of every HTTP 400 answer to `~/.omp/logs/http-400-requests/<id>.json` (mode `0644`). That copy is what omp sent to the proxy, before anonymization, so it holds the personal data in clear text. It stays on the machine; delete it when anon is in use.
